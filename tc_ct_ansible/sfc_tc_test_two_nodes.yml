@@ -1,0 +1,299 @@
+---
+  - name: SN1022 TC unit tests (two nodes, VXLAN, no OVS)
+    hosts: group1 group2
+    remote_user: alucerop
+    vars:
+       - destdir: /tmp/sfc_tc_unit_tests
+       - driver_dir: /tmp/sfc_tc_unit_tests/sfc-linux-net
+       - clean_all: "no"
+       - build_all: "yes"
+       - node1_PF_ip_addr: 2.2.2.1
+       - node1_PF_mac_addr: de:ad:be:ef:10:01
+       - node2_PF_ip_addr: 2.2.2.2
+       - node2_PF_mac_addr: de:ad:be:ef:10:02
+       - first_port_addr: 192.168.25.10
+       - second_port_addr: 192.168.25.11
+       - all_tests: []
+
+    tasks:
+
+       - name: clean all
+         file:
+            path: "{{ destdir }}"
+            state: absent
+         when: clean_all | bool
+
+       - name: remove sfc driver
+         shell:
+         args:
+           cmd: sudo rmmod virtual_bus sfc_driverlink sfc
+         ignore_errors: yes
+
+       - name: remove vxlan device if it does exists
+         shell:
+         args:
+           cmd: sudo ip link del name vxlan16 2> /dev/null
+         ignore_errors: yes
+
+       - name: check driver repo exists
+         stat:
+           path: "{{ driver_dir }}"
+         register: file_details
+
+       - name: create test dir
+         file:
+            path: "{{ destdir }}"
+            state: directory
+         ignore_errors: yes
+
+         # it would be good to use a user directory with the last changes to
+         # the driver for testing before pushing the changes
+       - name: Download driver master repo
+         git:
+            repo: 'git@github.com:Xilinx-CNS/sfc-linux-net.git'
+            dest: "{{ driver_dir }}"
+         when: (file_details.stat.exists == false)
+
+       - name: check system support TC, CT and OVS
+         shell: sudo ./scripts/check-tc-features.sh --ignore-ovs
+         args:
+            chdir: "{{ driver_dir }}"
+         when: inventory_hostname in groups['group1']
+
+       - name: build driver
+         shell: make
+         args:
+            chdir: "{{ driver_dir }}"
+            executable: /bin/bash
+         when: build_all | bool
+
+       - name: copy setup scripts
+         copy:
+           src: /home/alucerop/ansible_scripts/
+           dest: "{{ destdir }}"
+           mode: '0755'
+
+       - name: copy udp programs
+         copy:
+           src: /home/alucerop/udp_cliserv
+           dest: /tmp/
+           mode: '0755'
+
+       - name: copy tcp programs
+         copy:
+           src: /home/alucerop/tcp_cliserv
+           dest: /tmp/
+           mode: '0755'
+
+       - name: install driver
+         shell: sudo ./install_sfc_driver.sh
+         args:
+            chdir: "{{ destdir }}"
+
+       - name: detect sfc interface name
+         shell: ./detect_sfc_netdev.sh Name PF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node1_iface_name1
+         when: inventory_hostname in groups['group1']
+
+       - name: detect sfc interface PCI DEV
+         shell: ./detect_sfc_netdev.sh Device PF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node1_iface_pcidev
+         when: inventory_hostname in groups['group1']
+
+       - name: configure sfc interface first node
+         shell: "sudo ifconfig {{ node1_iface_name1.stdout }} {{ node1_PF_ip_addr }} netmask 255.255.255.0;
+                 sudo ifconfig {{ node1_iface_name1.stdout }} hw ether {{ node1_PF_mac_addr }};
+                 sudo ip link set dev {{ node1_iface_name1.stdout }} promisc on"
+         when: inventory_hostname in groups['group1']
+
+       - name: creating vxlan device
+         shell: "sudo ip link add name vxlan16 type vxlan external dev {{ node1_iface_name1.stdout }} remote 2.2.2.2 dstport 4789;
+                 sudo ifconfig vxlan16  up; sudo tc qdisc add dev vxlan16 ingress"
+         when: inventory_hostname in groups['group1']
+
+       - name: detect sfc interface name
+         shell: ./detect_sfc_netdev.sh Name PF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node2_iface_name1
+         when: inventory_hostname in groups['group2']
+
+       - name: detect sfc interface PCI DEV
+         shell: ./detect_sfc_netdev.sh Device PF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node2_iface_pcidev
+         when: inventory_hostname in groups['group2']
+
+       - name: configure sfc interface second node
+         shell: "sudo ifconfig {{ node2_iface_name1.stdout }} {{ node2_PF_ip_addr }} netmask 255.255.255.0;
+                 sudo ifconfig {{ node2_iface_name1.stdout }} hw ether {{ node2_PF_mac_addr }};
+                 sudo ip link set dev {{ node2_iface_name1.stdout }} promisc on"
+         when: inventory_hostname in groups['group2']
+
+       - name: creating vxlan device
+         #shell: "sudo ip link add name vxlan16 type vxlan id 16 dev {{ node2_iface_name1.stdout }} remote 2.2.2.1 dstport 4789;
+         shell: "sudo ip link add name vxlan16 type vxlan external dev {{ node2_iface_name1.stdout }} remote 2.2.2.1 dstport 4789;
+                 sudo ifconfig vxlan16  up; sudo tc qdisc add dev vxlan16 ingress"
+         when: inventory_hostname in groups['group2']
+
+       - name: create two VFs
+         shell: sudo bash -c "echo 2 > /sys/bus/pci/devices/{{ node1_iface_pcidev.stdout }}/sriov_numvfs"
+         when: inventory_hostname in groups['group1']
+
+       - name: create two VFs
+         shell: sudo bash -c "echo 2 > /sys/bus/pci/devices/{{ node2_iface_pcidev.stdout }}/sriov_numvfs"
+         when: inventory_hostname in groups['group2']
+
+       - name: detect sfc interface PCI DEV VF1 in node1
+         shell: ./detect_sfc_netdev.sh Name VF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node1_iface_name_vf1
+         when: inventory_hostname in groups['group1']
+
+       - name: detect sfc interface PCI DEV VF2
+         shell: ./detect_sfc_netdev.sh Name VF 2
+         args:
+            chdir: "{{ destdir }}"
+         register: node1_iface_name_vf2
+         when: inventory_hostname in groups['group1']
+
+       - name: Get first VF representor name
+         shell: "sudo dmesg | grep \"Representor for VF 0\" | awk '{ match($0,/(Representor for VF 0 is )+(eth[0-9])/,arr)} {print arr[2] }' | tail -1"
+         register: node1_vf1_repr
+         when: inventory_hostname in groups['group1']
+
+       - name: Get second VF representor name
+         shell: "sudo dmesg | grep \"Representor for VF 1\" | awk '{ match($0,/(Representor for VF 1 is )+(eth[0-9])/,arr)} {print arr[2] }' | tail -1"
+         register: node1_vf2_repr
+         when: inventory_hostname in groups['group1']
+
+       - name: create first network namespace and assign first VF to it
+         shell: sudo bash -c "ip netns add test_ns1; ip link set {{ node1_iface_name_vf1.stdout }} netns test_ns1"
+         when: inventory_hostname in groups['group1']
+
+       - name: Configure VF inside the network namespace
+         shell: sudo bash -c "ip netns exec test_ns1 ifconfig {{ node1_iface_name_vf1.stdout }} hw ether de:ad:be:ef:00:01;
+                                ip netns exec test_ns1 ifconfig {{ node1_iface_name_vf1.stdout }} {{ first_port_addr }} netmask 255.255.255.0"
+         when: inventory_hostname in groups['group1']
+
+       - name: Configure first VF representor
+         shell: sudo bash -c "ifconfig {{ node1_vf1_repr.stdout }} up; tc qdisc add dev {{ node1_vf1_repr.stdout }} ingress"
+         when: inventory_hostname in groups['group1']
+
+       - name: create second network namespace and assign second VF to it
+         shell: sudo bash -c "ip netns add test_ns2; ip link set {{ node1_iface_name_vf2.stdout }} netns test_ns2"
+         when: inventory_hostname in groups['group1']
+
+       - name: Configure VF inside the network namespace
+         shell: sudo bash -c "ip netns exec test_ns2 ifconfig {{ node1_iface_name_vf2.stdout }} hw ether de:ad:be:ef:00:01;
+                              ip netns exec test_ns2 ifconfig {{ node1_iface_name_vf2.stdout }} {{ first_port_addr }} netmask 255.255.255.0"
+         when: inventory_hostname in groups['group1']
+
+       - name: Configure second VF representor
+         shell: sudo bash -c "ifconfig {{ node1_vf2_repr.stdout }} up; tc qdisc add dev {{ node1_vf2_repr.stdout }} ingress"
+         when: inventory_hostname in groups['group1']
+
+       - name: detect sfc interface PCI DEV VF1 in node2
+         shell: ./detect_sfc_netdev.sh Name VF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node2_iface_name_vf1
+         when: inventory_hostname in groups['group2']
+
+       - name: detect sfc interface PCI DEV VF2
+         shell: ./detect_sfc_netdev.sh Name VF 2
+         args:
+            chdir: "{{ destdir }}"
+         register: node2_iface_name_vf2
+         when: inventory_hostname in groups['group2']
+
+       - name: Get first VF representor name
+         shell: "sudo dmesg | grep \"Representor for VF 0\" | awk '{ match($0,/(Representor for VF 0 is )+(eth[0-9])/,arr)} {print arr[2] }' | tail -1"
+         register: node2_vf1_repr
+         when: inventory_hostname in groups['group2']
+
+       - name: Get second VF representor name
+         shell: "sudo dmesg | grep \"Representor for VF 1\" | awk '{ match($0,/(Representor for VF 1 is )+(eth[0-9])/,arr)} {print arr[2] }' | tail -1"
+         register: node2_vf2_repr
+         when: inventory_hostname in groups['group2']
+
+       - name: create first network namespace and assign first VF to it
+         shell: sudo bash -c "ip netns add test_ns1; ip link set {{ node2_iface_name_vf1.stdout }} netns test_ns1"
+         when: inventory_hostname in groups['group2']
+
+       - name: Configure VF inside the network namespace
+         shell: sudo bash -c "ip netns exec test_ns1 ifconfig {{ node2_iface_name_vf1.stdout }} hw ether de:ad:be:ef:00:02;
+                                ip netns exec test_ns1 ifconfig {{ node2_iface_name_vf1.stdout }} {{ second_port_addr }} netmask 255.255.255.0"
+         when: inventory_hostname in groups['group2']
+
+       - name: Configure first VF representor
+         shell: sudo bash -c "ifconfig {{ node2_vf1_repr.stdout }} up; tc qdisc add dev {{ node2_vf1_repr.stdout }} ingress"
+         when: inventory_hostname in groups['group2']
+
+       - name: create second network namespace and assign second VF to it
+         shell: sudo bash -c "ip netns add test_ns2; ip link set {{ node2_iface_name_vf2.stdout }} netns test_ns2"
+         when: inventory_hostname in groups['group2']
+
+       - name: Configure VF inside the network namespace
+         shell: sudo bash -c "ip netns exec test_ns2 ifconfig {{ node2_iface_name_vf2.stdout }} hw ether de:ad:be:ef:00:02;
+                              ip netns exec test_ns2 ifconfig {{ node2_iface_name_vf2.stdout }} {{ second_port_addr }} netmask 255.255.255.0"
+         when: inventory_hostname in groups['group2']
+
+       - name: Configure second VF representor
+         shell: sudo bash -c "ifconfig {{ node2_vf2_repr.stdout }} up; tc qdisc add dev {{ node2_vf2_repr.stdout }} ingress"
+         when: inventory_hostname in groups['group2']
+
+         # there are now two private networks using same IP addresses:
+         #
+         #    VXLAN 16, Node1 CT Zone 1,  Node 1 VF1 192.168.25.10 <------>  Node 2 VF1 192.168.25.11
+         #    VXLAN 17, Node1 CT Zonw 2,  Node 1 VF2 192.168.25.10 <------>  Node 2 VF2 192.168.25.11
+         #
+
+       - name: TC configuration allowing ARP and IP between VFs in pairs using encap/decap rules
+         shell: "sudo tc filter add dev {{ node1_vf1_repr.stdout }} parent ffff: protocol arp flower action action tunnel_key set id 16 src_ip 2.2.2.1 dst_ip 2.2.2.2 dst_port 4789 action mirred egress redirect dev vxlan16;
+                 sudo tc filter add dev {{ node1_vf1_repr.stdout }} parent ffff: protocol ip flower action action tunnel_key set id 16 src_ip 2.2.2.1 dst_ip 2.2.2.2 dst_port 4789 action mirred egress redirect dev vxlan16;
+                 sudo tc filter add dev vxlan16 protocol arp parent ffff: prio 1 flower enc_dst_ip 2.2.2.1 enc_src_ip 2.2.2.2 enc_dst_port 4789 enc_key_id 16 action tunnel_key unset action mirred egress redirect dev {{ node1_vf1_repr.stdout }};
+                 sudo tc filter add dev vxlan16 protocol ip parent ffff: prio 2 flower enc_dst_ip 2.2.2.1 enc_src_ip 2.2.2.2 enc_dst_port 4789 enc_key_id 16 action tunnel_key unset action mirred egress redirect dev {{ node1_vf1_repr.stdout }};"
+         when: inventory_hostname in groups['group1']
+
+       - name: TC configuration allowing ARP and IP between VFs in pairs
+         shell: "sudo tc filter add dev {{ node2_vf1_repr.stdout }} parent ffff: protocol arp flower action action tunnel_key set id 16 src_ip 2.2.2.2 dst_ip 2.2.2.1 dst_port 4789 action mirred egress redirect dev vxlan16;
+                 sudo tc filter add dev {{ node2_vf1_repr.stdout }} parent ffff: protocol ip flower action action tunnel_key set id 16 src_ip 2.2.2.2 dst_ip 2.2.2.1 dst_port 4789 action mirred egress redirect dev vxlan16;
+                 sudo tc filter add dev vxlan16 protocol arp parent ffff: prio 1 flower enc_dst_ip 2.2.2.2 enc_src_ip 2.2.2.1 enc_dst_port 4789 enc_key_id 16 action tunnel_key unset action mirred egress redirect dev {{ node2_vf1_repr.stdout }};
+                 sudo tc filter add dev vxlan16 protocol ip parent ffff: prio 2 flower enc_dst_ip 2.2.2.2 enc_src_ip 2.2.2.1 enc_dst_port 4789 enc_key_id 16 action tunnel_key unset action mirred egress redirect dev {{ node2_vf1_repr.stdout }};"
+         when: inventory_hostname in groups['group2']
+
+       - name: run ping within first VFs pair
+         shell: sudo bash -c "ip netns exec test_ns1 ping -c10 {{ second_port_addr}}"
+         when: inventory_hostname in groups['group1']
+
+       - name: Get TC stats with hardware redirecting the packets
+         shell: "sleep 2; sudo tc -stats filter show dev {{ node1_vf1_repr.stdout }} parent ffff: | grep -A20 ipv4 | grep Sent | grep hardware | awk ' { print $5 }'"
+         register: VF_hardware_redirected
+         when: inventory_hostname in groups['group1']
+
+       - fail: msg="TC stats are NOT as expected. HW redirecting {{ VF_hardware_redirected.stdout }} instead of 10"
+         when: inventory_hostname in groups['group1'] and VF_hardware_redirected.stdout != "10"
+
+       - name: Checking TC stats are as expected
+         debug:
+                 msg: OK
+         when: inventory_hostname in groups['group1'] and VF_hardware_redirected.stdout == "10"
+
+       - include:  udp_ipv4/dual/sfc_test_tc_udp_conn.yml
+       - include:  tcp_ipv4/dual/sfc_test_tc_tcp_conn.yml
+       - include:  udp_ipv4/dual/sfc_test_tc_udp_addr_conn.yml
+       - include:  udp_ipv4/dual/sfc_test_tc_udp_port_conn.yml
+       - include:  udp_ipv4/dual/sfc_test_tc_udp_addr_port_conn.yml
+         #- include:  conntrack_ipv4/dual/sfc_test_tc_ct_tcp_conn.yml
+         #- include:  conntrack_ipv4/dual/sfc_test_tc_ct_udp_conn.yml
+         #- include:  conntrack_ipv4/dual/sfc_test_tc_ct_udp_conn_zones.yml
+
+       - name: print the executed tests
+         debug: var=all_tests

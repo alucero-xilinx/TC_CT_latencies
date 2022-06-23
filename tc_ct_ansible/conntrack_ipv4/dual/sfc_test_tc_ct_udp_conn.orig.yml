@@ -1,0 +1,136 @@
+
+       - name: TC configuration clean up
+         shell: "sudo tc qdisc del dev {{ node1_vf1_repr.stdout }} ingress;
+                 sudo tc qdisc del dev {{ node1_vf2_repr.stdout }} ingress;
+                 sudo tc qdisc del dev vxlan16 ingress;
+                 sudo tc qdisc add dev {{ node1_vf1_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ node1_vf2_repr.stdout }} ingress;
+                 sudo tc qdisc add dev vxlan16 ingress;
+                 "
+         when: inventory_hostname in groups['group1']
+
+       - name: TC configuration clean up
+         shell: "sudo tc qdisc del dev {{ node2_vf1_repr.stdout }} ingress;
+                 sudo tc qdisc del dev {{ node2_vf2_repr.stdout }} ingress;
+                 sudo tc qdisc del dev vxlan16 ingress;
+                 sudo tc qdisc add dev {{ node2_vf1_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ node2_vf2_repr.stdout }} ingress;
+                 sudo tc qdisc add dev vxlan16 ingress;
+                 "
+         when: inventory_hostname in groups['group2']
+
+       - name: TC configuration allowing ARP between VFs in pairs using encap/decap rules
+         shell: "sudo tc filter add dev {{ node1_vf1_repr.stdout }} parent ffff: protocol arp flower action action tunnel_key set id 16 src_ip 2.2.2.1 dst_ip 2.2.2.2 dst_port 4789 action mirred egress redirect dev vxlan16;
+                 sudo tc filter add dev vxlan16 protocol arp parent ffff: prio 1 flower enc_dst_ip 2.2.2.1 enc_src_ip 2.2.2.2 enc_dst_port 4789 enc_key_id 16 action tunnel_key unset action mirred egress redirect dev {{ node1_vf1_repr.stdout }};"
+         when: inventory_hostname in groups['group1']
+
+       - name: TC configuration allowing ARP between VFs in pairs using encap/decap rules
+         shell: "sudo tc filter add dev {{ node2_vf1_repr.stdout }} parent ffff: protocol arp flower action action tunnel_key set id 16 src_ip 2.2.2.2 dst_ip 2.2.2.1 dst_port 4789 action mirred egress redirect dev vxlan16;
+                 sudo tc filter add dev vxlan16 protocol arp parent ffff: prio 1 flower enc_dst_ip 2.2.2.2 enc_src_ip 2.2.2.1 enc_dst_port 4789 enc_key_id 16 action tunnel_key unset action mirred egress redirect dev {{ node2_vf1_repr.stdout }};"
+         when: inventory_hostname in groups['group2']
+
+       - name: TC configuration allowing UDP between VFs
+         shell: "sudo tc filter add dev {{ node1_vf1_repr.stdout }} protocol ip parent ffff: chain 0 flower ip_proto udp ct_state -trk action ct zone 2 pipe action goto chain 20;
+                 sudo tc filter add dev {{ node1_vf1_repr.stdout }} protocol ip parent ffff: chain 20 flower ip_proto udp ct_state +trk+new action ct zone 2 commit pipe action tunnel_key set id 16 src_ip 2.2.2.1 dst_ip 2.2.2.2 dst_port 4789 action mirred egress redirect dev vxlan16;
+                 sudo tc filter add dev {{ node1_vf1_repr.stdout }} protocol ip parent ffff: chain 20 flower ip_proto udp ct_state +trk+est action tunnel_key set id 16 src_ip 2.2.2.1 dst_ip 2.2.2.2 dst_port 4789 action mirred egress redirect dev vxlan16;
+
+                 sudo tc filter add dev vxlan16 protocol ip parent ffff: prio 2 flower enc_dst_ip 2.2.2.1 enc_src_ip 2.2.2.2 enc_dst_port 4789 enc_key_id 16 ct_state -trk action ct zone 2 pipe action goto chain 100;
+                 sudo tc filter add dev vxlan16 protocol ip parent ffff: chain 100 prio 2 flower enc_dst_ip 2.2.2.1 enc_src_ip 2.2.2.2 enc_dst_port 4789 enc_key_id 16 ct_state +trk+new action ct zone 2 commit pipe action tunnel_key unset action mirred egress redirect dev {{ node1_vf1_repr.stdout }};
+                 sudo tc filter add dev vxlan16 protocol ip parent ffff: chain 100 prio 3 flower enc_dst_ip 2.2.2.1 enc_src_ip 2.2.2.2 enc_dst_port 4789 enc_key_id 16 ct_state +trk+est action tunnel_key unset action mirred egress redirect dev {{ node1_vf1_repr.stdout }};"
+         when: inventory_hostname in groups['group1']
+
+         #sudo tc filter add dev vxlan16 protocol ip parent ffff: prio 2 flower enc_dst_ip 2.2.2.1 enc_src_ip 2.2.2.2 enc_dst_port 4789 enc_key_id 16 ct_state -trk action ct zone 2 pipe action goto chain 100;
+         #        sudo tc filter add dev vxlan16 protocol ip parent ffff: chain 100 prio 2 flower enc_dst_ip 2.2.2.1 enc_src_ip 2.2.2.2 enc_dst_port 4789 enc_key_id 16 ct_state +trk+new action ct zone 2 commit pipe action tunnel_key unset action mirred egress redirect dev {{ node1_vf1_repr.stdout }};
+         #        sudo tc filter add dev vxlan16 protocol ip parent ffff: chain 100 prio 3 flower enc_dst_ip 2.2.2.1 enc_src_ip 2.2.2.2 enc_dst_port 4789 enc_key_id 16 ct_state +trk+est action tunnel_key unset action mirred egress redirect dev {{ node1_vf1_repr.stdout }};"
+         #
+         #
+         #
+         #- name: TC configuration allowing UDP between VFs
+         #shell: "sudo tc filter add dev {{ node2_vf1_repr.stdout }} protocol ip parent ffff: chain 0 flower ip_proto udp ct_state -trk action ct zone 2 pipe action goto chain 20;
+         #        sudo tc filter add dev {{ node2_vf1_repr.stdout }} protocol ip parent ffff: chain 20 flower ip_proto udp ct_state +trk+new action ct zone 2 commit pipe action tunnel_key set id 16 src_ip 2.2.2.2 dst_ip 2.2.2.1 dst_port 4789 action mirred egress redirect dev vxlan16;
+         #        sudo tc filter add dev {{ node2_vf1_repr.stdout }} protocol ip parent ffff: chain 20 flower ip_proto udp ct_state +trk+est action ct zone 2 pipe action tunnel_key set id 16 src_ip 2.2.2.2 dst_ip 2.2.2.1 dst_port 4789 action mirred egress redirect dev vxlan16;
+         #
+         #        sudo tc filter add dev vxlan16 protocol ip parent ffff: prio 2 flower ip_proto udp enc_dst_ip 2.2.2.2 enc_src_ip 2.2.2.1 enc_dst_port 4789 enc_key_id 16 ct_state -trk action ct zone 2 pipe action goto chain 100;
+         #        sudo tc filter add dev vxlan16 protocol ip parent ffff: chain 100 prio 2 flower ip_proto udp enc_dst_ip 2.2.2.2 enc_src_ip 2.2.2.1 enc_dst_port 4789 enc_key_id 16 ct_state +trk+new action ct zone 2 commit pipe action tunnel_key unset action mirred egress redirect dev {{ node2_vf1_repr.stdout }};
+         #        sudo tc filter add dev vxlan16 protocol ip parent ffff: chain 100 prio 3 flower ip_proto udp enc_dst_ip 2.2.2.2 enc_src_ip 2.2.2.1 enc_dst_port 4789 enc_key_id 16 ct_state +trk+est action ct zone 2 pipe action tunnel_key unset action mirred egress redirect dev {{ node2_vf1_repr.stdout }};"
+         #when: inventory_hostname in groups['group2']
+
+       - name: TC configuration allowing UDP between VFs
+         shell: "sudo tc filter add dev {{ node2_vf1_repr.stdout }} protocol ip parent ffff: chain 0 flower ip_proto udp action goto chain 20;
+                 sudo tc filter add dev {{ node2_vf1_repr.stdout }} protocol ip parent ffff: chain 20 flower ip_proto udp action tunnel_key set id 16 src_ip 2.2.2.2 dst_ip 2.2.2.1 dst_port 4789 action mirred egress redirect dev vxlan16;
+         
+                 sudo tc filter add dev vxlan16 protocol ip parent ffff: prio 2 flower ip_proto udp action goto chain 100;
+                 sudo tc filter add dev vxlan16 protocol ip parent ffff: chain 100 prio 2 flower ip_proto udp action tunnel_key unset action mirred egress redirect dev {{ node2_vf1_repr.stdout }};"
+                 #sudo tc filter add dev vxlan16 protocol ip parent ffff: prio 2 flower ip_proto udp enc_dst_ip 2.2.2.2 enc_src_ip 2.2.2.1 enc_dst_port 4789 enc_key_id 16 action goto chain 100;
+                 #sudo tc filter add dev vxlan16 protocol ip parent ffff: chain 100 prio 2 flower ip_proto udp enc_dst_ip 2.2.2.2 enc_src_ip 2.2.2.1 enc_dst_port 4789 enc_key_id 16 action tunnel_key unset action mirred egress redirect dev {{ node2_vf1_repr.stdout }};"
+         when: inventory_hostname in groups['group2']
+
+       - name: Get filters installed from first representor
+         shell: "sudo tc filter show dev {{ node1_vf1_repr.stdout }} parent ffff: | grep in_hw_count | wc -l"
+         register: repr1_filters_in_hw
+         when: inventory_hostname in groups['group1']
+
+       - name: Checking TC filters installed in HW as expected
+         debug:
+                 msg: OK
+         when: inventory_hostname in groups['group1'] and repr1_filters_in_hw.stdout == "3" # ARP entry plus two UDP entries
+
+       - name: run udp server port 2222 in one network namespace
+         shell: sudo bash -c "killall server; ip netns exec test_ns1 /tmp/udp_cliserv/server {{ first_port_addr }} 2222"
+         when: inventory_hostname in groups['group1']
+
+       - name: run udp client conecting to server port 2222 in one network namespace
+         shell: sudo bash -c "killall client; ip netns exec test_ns2 /tmp/udp_cliserv/client {{ first_port_addr }} 2222 10"
+         when: inventory_hostname in groups['group2']
+
+       - name: Get TC stats with hardware redirecting the packets
+         shell: "sleep 2; sudo ./extract_tc_stats.sh {{ node1_vf1_repr.stdout }} trk+est 20 HW"
+         args:
+            chdir: "{{ destdir }}"
+         register: VF_hardware_redirected
+         when: inventory_hostname in groups['group1']
+
+       - name: Get TC stats with software redirecting the packets
+         shell: "sleep 2; sudo ./extract_tc_stats.sh {{ node1_vf1_repr.stdout }} trk+est 20 SW"
+         args:
+            chdir: "{{ destdir }}"
+         register: VF_software_redirected
+         when: inventory_hostname in groups['group1']
+
+         # We send 1000 packets and 999 will be redirected by HW once the conntrack connections is established and offloaded
+       - fail: msg="TC stats are NOT as expected. HW ({{ VF_hardware_redirected.stdout }}) plus SW ({{ VF_software_redirected.stdout }}) not 1000"
+         when: inventory_hostname in groups['group1'] and VF_hardware_redirected.stdout|int + VF_software_redirected.stdout|int != 9
+
+       - name: Checking TC stats as expected
+         debug:
+                 msg: OK
+         when: inventory_hostname in groups['group1'] and VF_hardware_redirected.stdout|int + VF_software_redirected.stdout|int == 9
+
+       - name: run tcp server in one network namespace
+         shell: sudo bash -c "killall server; ip netns exec test_ns1 /tmp/tcp_cliserv/server {{ first_port_addr }} 1111"
+         when: inventory_hostname in groups['group1']
+
+       - name: run tcp client in one network namespace (THIS SHOULD NOT WORK)
+         shell: sudo bash -c "killall client; ip netns exec test_ns2 /tmp/tcp_cliserv/client {{ first_port_addr }} 1111 100"
+         when: inventory_hostname in groups['group2']
+
+       - name: Get TC stats with hardware redirecting the packets
+         shell: "sleep 2; sudo ./extract_tc_stats.sh {{ node1_vf1_repr.stdout }} trk+est 20 HW"
+         args:
+            chdir: "{{ destdir }}"
+         register: VF_hardware_tcp_redirected
+         when: inventory_hostname in groups['group1']
+
+       - fail: msg="TC stats are NOT as expected. HW redirecting {{ VF_hardware_redirected.stdout }} instead of {{ VF_hardware_redirected.stdout }}"
+         when: inventory_hostname in groups['group1'] and VF_hardware_tcp_redirected.stdout|int != VF_hardware_redirected.stdout|int
+
+       - name: Get TC stats with software redirecting the packets
+         shell: "sleep 2; sudo ./extract_tc_stats.sh {{ node1_vf1_repr.stdout }} trk+est 20 SW"
+         args:
+            chdir: "{{ destdir }}"
+         register: VF_software_tcp_redirected
+         when: inventory_hostname in groups['group1']
+
+       - fail: msg="TC stats are NOT as expected. SW redirecting {{ VF_software_tcp_redirected.stdout }} instead of {{ VF_software_redirected.stdout }}"
+         when: inventory_hostname in groups['group1'] and VF_software_tcp_redirected.stdout|int != VF_software_redirected.stdout|int
+

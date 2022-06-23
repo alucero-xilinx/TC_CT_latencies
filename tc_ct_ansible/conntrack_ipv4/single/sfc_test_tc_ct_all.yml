@@ -1,0 +1,2 @@
+       - include: sfc_test_tc_ct_udp_conn.yml
+       - include: sfc_test_tc_ct_tcp_conn.yml

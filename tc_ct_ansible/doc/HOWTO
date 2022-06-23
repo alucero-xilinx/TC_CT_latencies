@@ -1,0 +1,89 @@
+This documents tries to explain the Ansible framework implemented for supporting
+TC and CT unit tests with the SN1022.
+
+First of all, the idea is to not use runbench here as these tests will be likely
+executed while implementing or fixing TC or CT support, and it needs to be quick
+and easy to use. Therefore, the machines involved are expected to have the right
+Linux kernel version and the SN1022 installed with the Conntrack FPGA image. The
+latest instruction about the FPGA image when working with Conntrack can be found
+here:
+
+https://github.com/Xilinx-CNS/cns-tc-rules/blob/single_mc/misc/update_ct_bundle_lv.sh
+
+About the right kernel, the main/root ansible file invokes the driver's script
+'check-tc-features.sh' which hopefully will detect if everything is fine for the
+tests to be executed. Note this script accepts arguments and it is invoked with
+different arguments by the main/root ansible file in each scenario. In current
+framework it is only necessary to install the conntrack FPGA image in the first
+machine. The tests have been implemented using an Ubuntu 20.04 with a
+5.9.0-050900-generic kernel.
+
+Four scenarios are contemplated:
+
+	- Tests using just one physical machine
+	- Tests using just one physical machine with OVS (not implemented yet)
+	- Tests using two physical machines with VXLAN
+	- Tests using two physical machines with VXLAN and OVS (not implemented yet)
+
+The system where the tests will be executed needs to define the machines to work
+with and the ansible package needs to be installed. If you use your VDI Linux
+system the ansible package is likely already installed and all you need to do is
+to define the tests machines inside '/etc/ansible/hosts' file:
+
+   [group1]
+   dellr740x
+
+   [group2]
+   dellr740w
+
+As an example, the previous lines define two machine groups with one machine in
+each group. The ansible tasks defined in the different Ansible scripts are
+executed in all the machines, but it is also possible to restrict the
+machines per group. This is used for doing the configuration differently when
+two machines are involved. The tests using a single machine use the group1.
+
+There is a main/root Ansible file for each scenario and specific unit tests
+defined for those scenarios. Some variables at the beggining of the script
+define which user will be executing the tasks on the machines, and the
+directory path to work with.
+
+The main/root file is responsible for:
+
+ - setting the involved machines with the proper configuration, meanwhile the
+   ansible unit tests files will only change the TC/CT configuration. Variables
+   defined by the main ansible file are used by the unit tests files. Some of
+   the work done is : PF, VFs and representor network interfaces configuration,
+   VF creation, vxlan (if required) creation, network namespaces creation,
+   attaching VFs to those network namespaces, and installing initial TC rules
+   for testing the machines connectivity using ping. 
+
+ - installing the driver, obtaining the sources and build the driver if not
+   already done. Ansible supports all the main git operations and it should not
+   be too difficult to adapt the driver installtion for special purposes. These
+   tests will likely be executed for testing code not commited yet, so pulling
+   from different repos is expected but not supported yet.
+
+ - installing the helper scripts and programs. Obtaining the different network
+   interfaces and PCI devices involved uses some of these helpers. Other are
+   related to getting the TC statistics after the test for checking out if the
+   expected number of packets have gone through the SW and/or HW paths. The
+   programs are simple UDP and TCP client servers programs which help to send
+   the specific number of packets to be checked out later. Having these
+   tailored programs will help also for testing specific behaviour, and for
+   measuring latencies at different points in time when connections are
+   established and specific packets exchange occur.
+
+ - defining files to be included where unit tests files are implemented. It is
+   expected to exists a 1:1 relationship between unit test and file. This makes
+   easy to activate/desactivate unit tests just commenting the line where each
+   test is referenced when necessary.
+
+The specific unit tests clean up any TC/CT rule removing the ingress qdics from
+the related network interface. The idea is to do just simple things in each test,
+checking out the expected packets go through the HW redirection based on the
+statistics shown by TC and reported by the HW. Usually a specific matching is
+set and the test does also check the same matching does not work for a similar
+matching, like allowing UDP traffic to a specific port but not TCP to the same
+port. Each test result will be added to the global variable all_tests defined in
+the main/root ansible file, and the last task is to print out the results of all
+tests.

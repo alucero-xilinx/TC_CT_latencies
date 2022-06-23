@@ -1,0 +1,34 @@
+# Testing the behaviour of TC and CT rules offload.
+#
+# The Driver/FW/HW does not support all the possibilities offered by the kernel.
+#
+# Let's check here that:
+#
+#       1) the HW can install those rules we do support. This needs to cover filters and actions.
+#       2) the HW will not install those rules with unsupported filters or actions.
+#       3) the HW will install those specific rules requiring "translation" like LHS to RHS rules.
+#
+#       how to check the outcome is as expected? Only looking at the filters installed or maybe looking
+#       at driver logs as well?
+#
+
+       - name: TC filter matching only protocol
+         shell: "sudo tc qdisc del dev {{ vf1_repr.stdout }} ingress;
+                 sudo tc qdisc del dev {{ vf2_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ vf1_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ vf2_repr.stdout }} ingress;
+                 "
+         when: inventory_hostname in groups['group1']
+
+       - name: Get TC ts with hardware redirecting the packets
+         shell: "sleep 2; sudo tc -stats filter show dev {{ vf1_repr.stdout }} parent ffff: | grep Sent | grep hardware | awk ' { print $5 }'"
+         register: VF_hardware_redirected
+         when: inventory_hostname in groups['group1']
+
+       - fail: msg="TC stats are NOT as expected. HW redirecting {{ VF_hardware_redirected.stdout }} instead of 1000"
+         when: VF_hardware_redirected.stdout != "1000"
+
+       - name: Checking TC stats are as expected
+         debug:
+                 msg: OK
+         when: VF_hardware_redirected.stdout == "1000"

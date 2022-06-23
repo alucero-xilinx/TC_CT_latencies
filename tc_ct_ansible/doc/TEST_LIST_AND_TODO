@@ -1,0 +1,29 @@
+Current unit tests implemented are the same for the single and dual machine
+scenarios, although obviously with different configuration (unit tests files).
+VXLAN is included for the dual one. 
+All the testing is ipv4 based.
+ARP redirection rules always.
+
+- Redirection between VFs based on matching UDP.
+- Redirection between VFs based on matching TCP.
+- Redirection between VFs based on matching UDP and IP address.
+- Redirection between VFs based on matching UDP and port number.
+- Redirection between VFs based on matching UDP, IP address and port number.
+- Redirection between VFs based on matching UDP with Conntrack.
+- Redirection between VFs based on matching TCP with Conntrack.
+
+
+TODO
+====
+- IPv6
+- OVS
+- Redirection between VFs based on matching UDP with Conntrack, isolation per zone.
+- Redirection between VFs based on matching TCP with Conntrack, isolation per zone.
+- Redirection between VFs based on matching IP and TTL.
+- Redirection between VFs based on matching IP, decrementing TTL.
+- Redirection between VFs based on matching UDP, doing DNAT in one way (client) and SNAT the other one.
+- Redirection between VFs based on matching TCP, doing DNAT in one way (client) and SNAT the other one.
+- Redirection between VFs based on matching UDP, doing SNAT in one way (client) and DNAT the other one.
+- Redirection between VFs based on matching TCP, doing SNAT in one way (client) and DNAT the other one.
+
+- Checking supported hardware offload rules, matching and actions. No data exchange.

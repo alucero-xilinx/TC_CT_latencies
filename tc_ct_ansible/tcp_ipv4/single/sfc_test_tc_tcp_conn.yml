@@ -1,0 +1,63 @@
+#
+# Test Description
+#
+# Two VFs in different network namespaces in the same machine.
+#
+# TC rules redirecting ARP and TCP packets between the VFs.
+#
+# A TCP exchange should increase the HW redirected packet stats accordingly.
+# A UDP exchange should not.
+#
+#
+       - name: TC configuration clean up
+         shell: "sudo tc qdisc del dev {{ vf1_repr.stdout }} ingress;
+                 sudo tc qdisc del dev {{ vf2_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ vf1_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ vf2_repr.stdout }} ingress;
+                 "
+         when: inventory_hostname in groups['group1']
+
+       - name: TC configuration allowing ARP between VFs
+         shell: "sudo tc filter add dev {{ vf1_repr.stdout }} parent ffff: protocol arp flower action mirred egress redirect dev {{ vf2_repr.stdout }};
+                 sudo tc filter add dev {{ vf2_repr.stdout }} parent ffff: protocol arp flower action mirred egress redirect dev {{ vf1_repr.stdout }}"
+         when: inventory_hostname in groups['group1']
+
+       - name: TC configuration allowing TCP between VFs
+         shell: "sudo tc filter add dev {{ vf1_repr.stdout }} parent ffff: protocol ip flower ip_proto tcp action mirred egress redirect dev {{ vf2_repr.stdout }};
+                 sudo tc filter add dev {{ vf2_repr.stdout }} parent ffff: protocol ip flower ip_proto tcp action mirred egress redirect dev {{ vf1_repr.stdout }}"
+         when: inventory_hostname in groups['group1']
+
+       - name: Get representor stats from client
+         shell: "sudo ifconfig {{ vf2_repr.stdout }}"
+         when: inventory_hostname in groups['group1']
+
+       - name: run udp server in one network namespace
+         shell: sudo bash -c "killall server; ip netns exec test_ns1 /tmp/tcp_cliserv/server 192.168.25.10 2222"
+         when: inventory_hostname in groups['group1']
+
+       - name: run udp client in one network namespace
+         shell: sudo bash -c "killall client; ip netns exec test_ns2 /tmp/tcp_cliserv/client 192.168.25.10 2222 1000"
+         when: inventory_hostname in groups['group1']
+
+       - name: Get TC stats with hardware redirecting the packets
+         shell: "sleep 2; sudo ./extract_tc_stats.sh {{ vf1_repr.stdout }} ipv4 25 HW"
+         args:
+            chdir: "{{ destdir }}"
+         register: VF_hardware_redirected
+         when: inventory_hostname in groups['group1']
+
+         # We exchange 1000 packets at application level but the TCP connection and closing add up.
+       - name: Checking TC stats are as expected
+         debug:
+                 msg: OK
+         when: inventory_hostname in groups['group1'] and VF_hardware_redirected.stdout|int > 1000
+
+       - name: Add test result to the all_test variable
+         set_fact:
+                 all_tests: "{{ all_tests }} + [ 'TCP IPV4 conn .............................................FAILED' ]"
+         when: inventory_hostname in groups['group1'] and VF_hardware_redirected.stdout|int < 1000
+
+       - name: Add test result to the all_test variable
+         set_fact:
+                 all_tests: "{{ all_tests }} + [ 'TCP IPV4 conn OK' ]"
+         when: inventory_hostname in groups['group1'] and VF_hardware_redirected.stdout|int > 1000

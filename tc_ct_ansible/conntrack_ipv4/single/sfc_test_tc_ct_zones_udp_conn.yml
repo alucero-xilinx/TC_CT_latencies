@@ -1,0 +1,122 @@
+
+       - name: TC configuration clean up
+         shell: "sudo tc qdisc del dev {{ vf1_repr.stdout }} ingress;
+                 sudo tc qdisc del dev {{ vf2_repr.stdout }} ingress;
+                 sudo tc qdisc del dev {{ vf3_repr.stdout }} ingress;
+                 sudo tc qdisc del dev {{ vf4_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ vf1_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ vf2_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ vf3_repr.stdout }} ingress;
+                 sudo tc qdisc add dev {{ vf4_repr.stdout }} ingress;
+                 "
+         when: inventory_hostname in groups['group1']
+
+       - name: TC configuration allowing ARP between VFs
+         shell: "sudo tc filter add dev {{ vf1_repr.stdout }} parent ffff: protocol arp flower action mirred egress redirect dev {{ vf2_repr.stdout }};
+                 sudo tc filter add dev {{ vf2_repr.stdout }} parent ffff: protocol arp flower action mirred egress redirect dev {{ vf1_repr.stdout }};
+                 sudo tc filter add dev {{ vf3_repr.stdout }} parent ffff: protocol arp flower action mirred egress redirect dev {{ vf4_repr.stdout }};
+                 sudo tc filter add dev {{ vf4_repr.stdout }} parent ffff: protocol arp flower action mirred egress redirect dev {{ vf3_repr.stdout }}"
+
+         when: inventory_hostname in groups['group1']
+
+       - name: TC configuration allowing UDP between VFs
+         shell: "sudo tc filter add dev {{ vf1_repr.stdout }} parent ffff: protocol ip chain 0 flower ip_proto udp ct_state -trk action ct zone 2 pipe action goto chain 20;
+                 sudo tc filter add dev {{ vf1_repr.stdout }} parent ffff: protocol ip chain 20 flower ip_proto udp ct_state +trk+new action ct zone 2 commit pipe action mirred egress redirect dev {{ vf2_repr.stdout }};
+                 sudo tc filter add dev {{ vf1_repr.stdout }} parent ffff: protocol ip chain 20 flower ip_proto udp ct_state +trk+est action mirred egress redirect dev {{ vf2_repr.stdout }};
+                 sudo tc filter add dev {{ vf2_repr.stdout }} parent ffff: protocol ip chain 0 flower ip_proto udp ct_state -trk action ct zone 3 pipe action goto chain 20;
+                 sudo tc filter add dev {{ vf2_repr.stdout }} parent ffff: protocol ip chain 20 flower ip_proto udp ct_state +trk+new action ct zone 3 pipe action mirred egress redirect dev {{ vf1_repr.stdout }};
+                 sudo tc filter add dev {{ vf2_repr.stdout }} parent ffff: protocol ip chain 20 flower ip_proto udp ct_state +trk+est action mirred egress redirect dev {{ vf1_repr.stdout }};"
+
+         when: inventory_hostname in groups['group1']
+
+       - name: Get filters installed from first representor
+         shell: "sudo tc filter show dev {{ vf1_repr.stdout }} parent ffff: | grep in_hw_count | wc -l"
+         register: repr1_filters_in_hw
+         when: inventory_hostname in groups['group1']
+
+       - name: Checking TC filters installed in HW as expected
+         debug:
+                 msg: OK
+         when: repr1_filters_in_hw.stdout == "3" # ARP entry plus two UDP entries
+
+       - name: Get filters installed from second representor
+         shell: "sudo tc filter show dev {{ vf2_repr.stdout }} parent ffff: | grep in_hw_count | wc -l"
+         register: repr2_filters_in_hw
+         when: inventory_hostname in groups['group1']
+
+       - name: Checking TC filters installed in HW as expected
+         debug:
+                 msg: OK
+         when: repr2_filters_in_hw.stdout == "3" # ARP entry plus two UDP entries
+
+       - name: Get representor stats from client
+         shell: "sudo ifconfig {{ vf2_repr.stdout }}"
+         when: inventory_hostname in groups['group1']
+
+       - name: run udp server port 2222 in one network namespace
+         shell: sudo bash -c "killall server; ip netns exec test_ns1 /tmp/udp_cliserv/server {{ first_port_addr }} 2222"
+         when: inventory_hostname in groups['group1']
+
+       - name: run udp client conecting to server port 2222 in one network namespace
+         shell: sudo bash -c "killall client; ip netns exec test_ns2 /tmp/udp_cliserv/client {{ first_port_addr }} 2222 1000"
+         when: inventory_hostname in groups['group1']
+
+       - name: Get TC stats with hardware redirecting the packets
+         shell: "sleep 2; sudo ./extract_tc_stats.sh {{ vf1_repr.stdout }} trk+est 10 HW"
+         args:
+            chdir: "{{ destdir }}"
+         register: VF_hardware_redirected
+         when: inventory_hostname in groups['group1']
+
+       - name: Get TC stats with software redirecting the packets
+         shell: "sleep 2; sudo ./extract_tc_stats.sh {{ vf1_repr.stdout }} trk+est 10 SW"
+         args:
+            chdir: "{{ destdir }}"
+         register: VF_software_redirected
+         when: inventory_hostname in groups['group1']
+
+       - fail: msg="TC stats are NOT as expected. HW ({{ VF_hardware_redirected.stdout }}) plus SW ({{ VF_software_redirected.stdout }}) not 1000"
+         when: VF_hardware_redirected.stdout|int + VF_software_redirected.stdout|int != 1000
+
+       - name: Checking TC stats as expected
+         debug:
+                 msg: OK
+         when: VF_hardware_redirected.stdout|int + VF_software_redirected.stdout|int == 1000
+
+       - name: Get representor stats from client
+         shell: "sudo ifconfig {{ vf2_repr.stdout }}"
+         when: inventory_hostname in groups['group1']
+
+       - name: run tcp server in one network namespace
+         shell: sudo bash -c "killall server; ip netns exec test_ns1 /tmp/tcp_cliserv/server {{ first_port_addr }} 1111"
+         when: inventory_hostname in groups['group1']
+
+       - name: run tcp client in one network namespace (THIS SHOULD NOT WORK)
+         shell: sudo bash -c "killall client; ip netns exec test_ns2 /tmp/tcp_cliserv/client {{ first_port_addr }} 1111 100"
+         when: inventory_hostname in groups['group1']
+
+       - name: Get TC stats with hardware redirecting the packets
+         shell: "sleep 2; sudo ./extract_tc_stats.sh {{ vf1_repr.stdout }} trk+est 10 HW"
+         args:
+            chdir: "{{ destdir }}"
+         register: VF_hardware_tcp_redirected
+         when: inventory_hostname in groups['group1']
+
+       - fail: msg="TC stats are NOT as expected. HW redirecting {{ VF_hardware_redirected.stdout }} instead of {{ VF_hardware_redirected.stdout }}"
+         when: VF_hardware_tcp_redirected.stdout|int != VF_hardware_redirected.stdout|int
+
+       - name: Get TC stats with software redirecting the packets
+
+         shell: "sleep 2; sudo ./extract_tc_stats.sh {{ vf1_repr.stdout }} trk+est 10 SW"
+         args:
+            chdir: "{{ destdir }}"
+         register: VF_software_tcp_redirected
+         when: inventory_hostname in groups['group1']
+
+       - fail: msg="TC stats are NOT as expected. SW redirecting {{ VF_software_tcp_redirected.stdout }} instead of {{ VF_software_redirected.stdout }}"
+         when: VF_software_tcp_redirected.stdout|int != VF_software_redirected.stdout|int
+
+       - name: Get representor stats from client
+         shell: "sudo ifconfig {{ vf2_repr.stdout }}"
+         when: inventory_hostname in groups['group1']
+
