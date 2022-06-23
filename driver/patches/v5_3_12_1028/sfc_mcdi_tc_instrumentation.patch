@@ -1,0 +1,1534 @@
+diff --git a/drivers/net/ethernet/sfc/mcdi.c b/drivers/net/ethernet/sfc/mcdi.c
+index 449009bc6..d490024d2 100644
+--- a/drivers/net/ethernet/sfc/mcdi.c
++++ b/drivers/net/ethernet/sfc/mcdi.c
+@@ -14,12 +14,18 @@
+ #include "efx_devlink.h"
+ #include "io.h"
+ #include "mcdi_pcol.h"
++#include "mcdi_pcol_mae.h"
+ #include "aoe.h"
++#include "debugfs.h"
+ 
+ struct efx_mcdi_copy_buffer {
+ 	_MCDI_DECLARE_BUF(buffer, MCDI_CTL_SDU_LEN_MAX);
+ };
+ 
++atomic64_t concurrent_mcdi = ATOMIC64_INIT(0);
++int64_t mcdi_poll_delayed = 0;
++int64_t max_concurrent_mcdi = 0;
++
+ /**************************************************************************
+  *
+  * Management-Controller-to-Driver Interface
+@@ -160,6 +166,151 @@ static unsigned long efx_mcdi_rpc_timeout(struct efx_nic *efx, unsigned int cmd)
+ 		return efx->type->mcdi_rpc_timeout(efx, cmd);
+ }
+ 
++struct mc_cmd_elem {
++	char cmd_name[100];
++	int cmd;
++};
++
++struct mc_cmd_elem mc_cmd_mae_array[] = {
++	/* Command strings should be less than 100 chars */
++	{"MC_CMD_MAE_COUNTER_ALLOC", MC_CMD_MAE_COUNTER_ALLOC},
++	{"MC_CMD_MAE_COUNTER_FREE", MC_CMD_MAE_COUNTER_FREE},
++	{"MC_CMD_MAE_COUNTER_LIST_ALLOC", MC_CMD_MAE_COUNTER_LIST_ALLOC},
++	{"MC_CMD_MAE_COUNTER_LIST_FREE", MC_CMD_MAE_COUNTER_LIST_FREE},
++	{"MC_CMD_MAE_ENCAP_HEADER_ALLOC", MC_CMD_MAE_ENCAP_HEADER_ALLOC},
++	{"MC_CMD_MAE_ENCAP_HEADER_UPDATE", MC_CMD_MAE_ENCAP_HEADER_UPDATE},
++	{"MC_CMD_MAE_ENCAP_HEADER_FREE", MC_CMD_MAE_ENCAP_HEADER_FREE},
++	{"MC_CMD_MAE_ACTION_SET_ALLOC", MC_CMD_MAE_ACTION_SET_ALLOC},
++	{"MC_CMD_MAE_ACTION_SET_FREE", MC_CMD_MAE_ACTION_SET_FREE},
++	{"MC_CMD_MAE_ACTION_SET_LIST_ALLOC", MC_CMD_MAE_ACTION_SET_LIST_ALLOC},
++	{"MC_CMD_MAE_ACTION_SET_LIST_FREE", MC_CMD_MAE_ACTION_SET_LIST_FREE},
++	{"MC_CMD_MAE_ACTION_RULE_DELETE", MC_CMD_MAE_ACTION_RULE_DELETE},
++	{"MC_CMD_MAE_OUTER_RULE_INSERT", MC_CMD_MAE_OUTER_RULE_INSERT},
++	{"MC_CMD_MAE_OUTER_RULE_REMOVE", MC_CMD_MAE_OUTER_RULE_REMOVE},
++	{"MC_CMD_MAE_ACTION_RULE_INSERT", MC_CMD_MAE_ACTION_RULE_INSERT},
++	{"MC_CMD_MAE_ACTION_RULE_UPDATE", MC_CMD_MAE_ACTION_RULE_UPDATE},
++	{"MC_CMD_MAE_OUTER_RULE_UPDATE", MC_CMD_MAE_OUTER_RULE_UPDATE},
++	{"", -1},
++};
++
++struct mc_cmd_elem mc_cmd_ct_array[] = {
++	/* Command strings should be less than 100 chars */
++	{"MC_CMD_TABLE_INSERT", MC_CMD_TABLE_INSERT},
++	{"MC_CMD_TABLE_UPDATE", MC_CMD_TABLE_UPDATE},
++	{"MC_CMD_TABLE_DELETE", MC_CMD_TABLE_DELETE},
++	{"", -1},
++};
++
++struct mc_cmd_array_types {
++	char description[100];
++	struct mc_cmd_elem *mc_cmd_set;
++};
++
++struct mc_cmd_array_types mc_cmd_array_types_set[] = {
++	/* Command array description string should be less than 100 chars */
++	{"MAE MCDI COMMANDS", mc_cmd_mae_array},
++	{"CONNTRACK MCDI COMMANDS", mc_cmd_ct_array},
++	{"", NULL},
++};
++
++static int efx_mcdi_debugfs_dump_lats(struct seq_file *file, void *data)
++{
++	int64_t total_count, total_added;
++	struct mc_cmd_elem *mc_cmd_set;
++	int64_t current_mcdi;
++	struct efx_nic *efx = data;
++	int index, j, i = 0;
++
++	mc_cmd_set = mc_cmd_array_types_set[i].mc_cmd_set;
++
++	while (mc_cmd_set) {
++		seq_printf(file, "\n\t%s:\n",
++				 mc_cmd_array_types_set[i].description);
++
++		j = 0;
++		index = mc_cmd_set[j].cmd;
++		while (index != -1) {
++			total_count =
++				atomic64_read(&LATENCIES_MCDI_QUEUED_CMD[index].total_count_latencies);
++			if (!total_count) {
++				index = mc_cmd_set[++j].cmd;
++				continue;
++			}
++			total_added =
++				atomic64_read(&LATENCIES_MCDI_QUEUED_CMD[index].total_added_latencies);
++
++			seq_printf(file, "\n\t\t%s:\n", mc_cmd_set[j].cmd_name);
++			seq_printf(file, "\t\t\tMax: %llu\n",
++					 LATENCIES_MCDI_QUEUED_CMD[index].max_latency);
++			seq_printf(file, "\t\t\tTotal: %llu\n", total_count);
++			if (total_count)
++				seq_printf(file, "\t\t\tMean: %llu\n",
++						 total_added / total_count);
++
++			total_count =
++				atomic64_read(&LATENCIES_MCDI_ISSUED_CMD[index].total_count_latencies);
++			total_added =
++				atomic64_read(&LATENCIES_MCDI_ISSUED_CMD[index].total_added_latencies);
++
++			seq_printf(file, "\t\t\tIssued Max: %llu\n",
++					 LATENCIES_MCDI_ISSUED_CMD[index].max_latency);
++			seq_printf(file, "\t\t\tIssued Total: %llu\n", total_count);
++			if (total_count)
++				seq_printf(file, "\t\t\tIssued Mean: %llu\n",
++						 total_added / total_count);
++			total_count =
++				atomic64_read(&LATENCIES_MCDI_ISSUED_CMD[index].total_poll_delayed);
++			seq_printf(file, "\t\t\tIssued delayed: %llu\n", total_count);
++			index = mc_cmd_set[++j].cmd;
++		}
++		mc_cmd_set = mc_cmd_array_types_set[++i].mc_cmd_set;
++	}
++	seq_printf(file, "\n\n\tMax queued MCDIs: %llu\n", max_concurrent_mcdi);
++	current_mcdi = atomic64_read(&concurrent_mcdi);
++	seq_printf(file, "\n\n\tCurrent queued MCDIs: %llu\n", current_mcdi);
++	seq_printf(file, "\n\n\tMCDIs with delayed polling: %llu\n", mcdi_poll_delayed);
++	seq_printf(file, "\n");
++
++	return 0;
++}
++
++static int efx_mcdi_debugfs_lats_reset(struct seq_file *file, void *data)
++{
++	struct mc_cmd_elem *mc_cmd_set;
++	struct efx_nic *efx = data;
++	int index, j, i = 0;
++
++	mc_cmd_set = mc_cmd_array_types_set[i].mc_cmd_set;
++
++	while (mc_cmd_set) {
++		j = 0;
++		index = mc_cmd_set[j].cmd;
++		while (index != -1) {
++			atomic64_set(&LATENCIES_MCDI_QUEUED_CMD[index].total_count_latencies, 0);
++			atomic64_set(&LATENCIES_MCDI_QUEUED_CMD[index].total_added_latencies, 0);
++			atomic64_set(&LATENCIES_MCDI_ISSUED_CMD[index].total_count_latencies, 0);
++			atomic64_set(&LATENCIES_MCDI_ISSUED_CMD[index].total_added_latencies, 0);
++			atomic64_set(&LATENCIES_MCDI_ISSUED_CMD[index].total_poll_delayed, 0);
++			LATENCIES_MCDI_QUEUED_CMD[index].max_latency = 0;
++			index = mc_cmd_set[++j].cmd;
++		}
++		mc_cmd_set = mc_cmd_array_types_set[++i].mc_cmd_set;
++	}
++	atomic64_set(&concurrent_mcdi, 0);
++	max_concurrent_mcdi = 0;
++	mcdi_poll_delayed = 0;
++
++	return 0;
++}
++
++static int mcdi_debugfs_configured = 0;
++
++static struct efx_debugfs_parameter efx_mcdi_debugfs[] = {
++	_EFX_RAW_PARAMETER(mcdi_latencies, efx_mcdi_debugfs_dump_lats),
++	_EFX_RAW_PARAMETER(mcdi_latencies_reset, efx_mcdi_debugfs_lats_reset),
++	{NULL}
++};
++
+ #ifdef EFX_NOT_UPSTREAM
+ static void efx_mcdi_parse_mcdi_list(struct efx_nic *efx, char *list,
+ 				     unsigned long *bitmap)
+@@ -289,6 +440,11 @@ void efx_mcdi_fini(struct efx_nic *efx)
+ 	if (!efx->mcdi)
+ 		return;
+ 
++	if (mcdi_debugfs_configured) {
++		efx_trim_debugfs_port(efx, efx_mcdi_debugfs);
++		mcdi_debugfs_configured = 0;
++	}
++
+ 	efx_mcdi_wait_for_cleanup(efx);
+ 
+ 	iface = efx_mcdi(efx);
+@@ -802,6 +958,8 @@ static int efx_mcdi_rpc_sync(struct efx_nic *efx, unsigned int cmd,
+ 	struct efx_mcdi_blocking_data *wait_data;
+ 	struct efx_mcdi_cmd *cmd_item;
+ 	unsigned int handle;
++	u64 tstart, tend;
++	int64_t max;
+ 	int rc;
+ 
+ 	if (outlen_actual)
+@@ -832,6 +990,17 @@ static int efx_mcdi_rpc_sync(struct efx_nic *efx, unsigned int cmd,
+ 	cmd_item->inlen = inlen;
+ 	cmd_item->inbuf = inbuf;
+ 
++	if(!mcdi_debugfs_configured && efx->debug_port_dir) {
++		efx_extend_debugfs_port(efx, efx, 0, efx_mcdi_debugfs);
++		mcdi_debugfs_configured = 1;
++	}
++
++	tstart = ktime_get_ns();
++	atomic64_inc(&concurrent_mcdi);
++	max = atomic64_read(&concurrent_mcdi);
++	if (max_concurrent_mcdi < max)
++		max_concurrent_mcdi = max;
++	
+ 	/* Claim an extra reference for the completer to put. */
+ 	kref_get(&wait_data->ref);
+ 	rc = efx_mcdi_rpc_async_internal(efx, cmd_item, &handle, true, false);
+@@ -854,6 +1023,23 @@ static int efx_mcdi_rpc_sync(struct efx_nic *efx, unsigned int cmd,
+ 		wait_data->outlen_actual = 0;
+ 	}
+ 
++	tend = ktime_get_ns();
++	tend -= tstart;
++	atomic64_dec(&concurrent_mcdi);
++
++	/* This compare and exchange could be performed atomically, but it
++	 * is not so important to do so. If some other thread changes the max
++	 * latency value between reading and updating it, we do not care.
++	 * Missing one value would be important if such one is really odd, but
++	 * the fact that two happen in such small window denies such oddity.
++	 * Otherwise this requires a loop whis preferible to avoid.
++	 */
++	if (tend > LATENCIES_MCDI_QUEUED_CMD[cmd].max_latency)
++		LATENCIES_MCDI_QUEUED_CMD[cmd].max_latency = tend;
++
++	atomic64_add(tend, &LATENCIES_MCDI_QUEUED_CMD[cmd].total_added_latencies);
++	atomic64_inc(&LATENCIES_MCDI_QUEUED_CMD[cmd].total_count_latencies);
++
+ 	if (outlen_actual)
+ 		*outlen_actual = wait_data->outlen_actual;
+ 	rc = wait_data->rc;
+@@ -980,6 +1166,7 @@ static int efx_mcdi_cmd_start_or_queue_ext(struct efx_mcdi_iface *mcdi,
+ 		cmd->bufid = bufid;
+ 		cmd->polled = mcdi->mode == MCDI_MODE_POLL;
+ 		cmd->reboot_seen = false;
++		cmd->tstart = ktime_get_ns();
+ 		efx_mcdi_send_request(efx, cmd);
+ 		cmd->state = MCDI_STATE_RUNNING;
+ 
+@@ -1034,6 +1221,7 @@ static void efx_mcdi_poll_start(struct efx_mcdi_iface *mcdi,
+ 	 * and poll once a jiffy (approximately)
+ 	 */
+ 	int spins = copybuf ? USER_TICK_USEC : 0;
++	struct efx_nic *efx = mcdi->efx;
+ 
+ 	while (spins) {
+ 		if (efx_mcdi_poll_once(mcdi, cmd)) {
+@@ -1044,6 +1232,8 @@ static void efx_mcdi_poll_start(struct efx_mcdi_iface *mcdi,
+ 		--spins;
+ 		udelay(1);
+ 	}
++	mcdi_poll_delayed++;
++	atomic64_inc(&LATENCIES_MCDI_ISSUED_CMD[cmd->cmd].total_poll_delayed);
+ 
+ 	/* didn't get a response in the first jiffy;
+ 	 * schedule poll after another jiffy
+@@ -1352,6 +1542,13 @@ static bool efx_mcdi_complete_cmd(struct efx_mcdi_iface *mcdi,
+ 			cmd->outlen = outbuf ? resp_data_len : 0;
+ 			efx_mcdi_remove_cmd(mcdi, cmd, cleanup_list);
+ 			completed = true;
++			cmd->tend = ktime_get_ns();
++			cmd->tend -= cmd->tstart;
++			if (cmd->tend > LATENCIES_MCDI_ISSUED_CMD[cmd->cmd].max_latency)
++				LATENCIES_MCDI_ISSUED_CMD[cmd->cmd].max_latency = cmd->tend;
++
++				atomic64_add(cmd->tend, &LATENCIES_MCDI_ISSUED_CMD[cmd->cmd].total_added_latencies);
++				atomic64_inc(&LATENCIES_MCDI_ISSUED_CMD[cmd->cmd].total_count_latencies);
+ 		}
+ 	}
+ 
+diff --git a/drivers/net/ethernet/sfc/mcdi.h b/drivers/net/ethernet/sfc/mcdi.h
+index 1f3511a4b..370781815 100644
+--- a/drivers/net/ethernet/sfc/mcdi.h
++++ b/drivers/net/ethernet/sfc/mcdi.h
+@@ -134,6 +134,7 @@ struct efx_mcdi_cmd {
+ 	efx_mcdi_async_completer *completer;
+ 	unsigned int handle;
+ 	unsigned int cmd;
++	u64 tstart, tend;
+ 	int rc;
+ 	size_t outlen;
+ 	efx_dword_t *outbuf;
+@@ -141,6 +142,21 @@ struct efx_mcdi_cmd {
+ 	/* followed by inbuf data if necessary */
+ };
+ 
++struct efx_mcdi_latency_stats {
++	u64 max_latency;
++	atomic64_t total_added_latencies;
++	atomic64_t total_count_latencies;
++	atomic64_t total_poll_delayed;
++};
++
++/* Do we have a good way of knowing how many MCDI commands do we have or which
++ * is the highest command ID we need to support? This next definition is based
++ * on looking at mcdi_pcol.h and mcdi_pcol_mae.h .
++ */
++#define MCDI_CMD_MAX	0x200
++#define LATENCIES_MCDI_QUEUED_CMD	efx->mcdi->iface.cmd_queued_lat_stats
++#define LATENCIES_MCDI_ISSUED_CMD	efx->mcdi->iface.cmd_issued_lat_stats
++
+ #ifdef EFX_NOT_UPSTREAM
+ #define MCDI_NUM_LOG_COMMANDS 0x300
+ #endif
+@@ -182,6 +198,8 @@ struct efx_mcdi_iface {
+ 	DECLARE_BITMAP(log_commands, MCDI_NUM_LOG_COMMANDS);
+ #endif
+ #endif
++	struct efx_mcdi_latency_stats cmd_queued_lat_stats[MCDI_CMD_MAX];
++	struct efx_mcdi_latency_stats cmd_issued_lat_stats[MCDI_CMD_MAX];
+ };
+ 
+ struct efx_mcdi_mon {
+diff --git a/drivers/net/ethernet/sfc/tc.c b/drivers/net/ethernet/sfc/tc.c
+index b370e0950..34b5cbd23 100644
+--- a/drivers/net/ethernet/sfc/tc.c
++++ b/drivers/net/ethernet/sfc/tc.c
+@@ -420,7 +420,8 @@ static void efx_release_neigh(struct efx_nic *efx,
+ }
+ 
+ static void efx_tc_flower_release_encap_md(struct efx_nic *efx,
+-					   struct efx_tc_encap_action *encap);
++					   struct efx_tc_encap_action *encap,
++					   int *mcdi_cnt);
+ 
+ static void efx_neigh_update(struct work_struct *work)
+ {
+@@ -595,22 +596,37 @@ static struct efx_tc_counter *efx_tc_flower_find_counter_by_fw_id(
+ }
+ 
+ static void efx_tc_flower_put_counter_index(struct efx_nic *efx,
+-					    struct efx_tc_counter_index *ctr)
++					    struct efx_tc_counter_index *ctr,
++					    int *mcdi_cnt)
+ {
++	int mcnt;
++
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
++
+ 	if (!refcount_dec_and_test(&ctr->ref))
+ 		return; /* still in use */
+ 	rhashtable_remove_fast(&efx->tc->counter_id_ht, &ctr->linkage,
+ 			       efx_tc_counter_id_ht_params);
+ 	efx_tc_flower_release_counter(efx, ctr->cnt);
++	mcnt++;
++
++	if (mcdi_cnt)
++		*mcdi_cnt = mcnt;
++
+ 	kfree(ctr);
+ }
+ 
+ static struct efx_tc_counter_index *efx_tc_flower_get_counter_index(
+ 				struct efx_nic *efx, unsigned long cookie,
+-				enum efx_tc_counter_type type)
++				enum efx_tc_counter_type type, int *mcdi_cnt)
+ {
+ 	struct efx_tc_counter_index *ctr, *old;
+ 	struct efx_tc_counter *cnt;
++	int mcnt = 0;
++
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
+ 
+ 	ctr = kzalloc(sizeof(*ctr), GFP_USER);
+ 	if (!ctr)
+@@ -637,6 +653,9 @@ static struct efx_tc_counter_index *efx_tc_flower_get_counter_index(
+ 		}
+ 		ctr->cnt = cnt;
+ 		refcount_set(&ctr->ref, 1);
++		mcnt++;
++		if (mcdi_cnt)
++			*mcdi_cnt = mcnt;
+ 	}
+ 	return ctr;
+ }
+@@ -912,13 +931,18 @@ static void efx_tc_update_encap(struct efx_nic *efx,
+ 
+ static struct efx_tc_encap_action *efx_tc_flower_create_encap_md(
+ 			struct efx_nic *efx, const struct ip_tunnel_info *info,
+-			struct net_device *egdev, struct netlink_ext_ack *extack)
++			struct net_device *egdev, struct netlink_ext_ack *extack,
++			int *mcdi_cnt)
+ {
+ 	enum efx_encap_type type = efx_tc_indr_netdev_type(egdev);
+ 	struct efx_tc_encap_action *encap, *old;
++	int mcnt = 0;
+ 	struct efx_rep *to_efv;
+ 	s64 rc;
+ 
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
++
+ 	if (type == EFX_ENCAP_TYPE_NONE) {
+ 		/* dest is not an encap device */
+ 		EFX_TC_ERR_MSG(efx, extack, "Not a (supported) tunnel device but tunnel_key is set");
+@@ -991,6 +1015,10 @@ static struct efx_tc_encap_action *efx_tc_flower_create_encap_md(
+ 		goto out_release;
+ 	}
+ 
++	mcnt++;
++	if (mcdi_cnt)
++		*mcdi_cnt = mcnt;
++
+ 	/* ref and return */
+ 	refcount_set(&encap->ref, 1);
+ 	return encap;
+@@ -1005,14 +1033,23 @@ out_free:
+ }
+ 
+ static void efx_tc_flower_release_encap_md(struct efx_nic *efx,
+-					   struct efx_tc_encap_action *encap)
++					   struct efx_tc_encap_action *encap,
++					   int *mcdi_cnt)
+ {
++	int mcnt = 0;
++
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
++
+ 	if (!refcount_dec_and_test(&encap->ref))
+ 		return; /* still in use */
+ 	efx_release_neigh(efx, encap);
+ 	rhashtable_remove_fast(&efx->tc->encap_ht, &encap->linkage,
+ 			       efx_tc_encap_ht_params);
+ 	efx_mae_free_encap_md(efx, encap);
++	mcnt++;
++	if (mcdi_cnt)
++		*mcdi_cnt = mcnt;
+ 	kfree(encap);
+ }
+ 
+@@ -1067,8 +1104,14 @@ static void efx_tc_flower_put_mac(struct efx_nic *efx,
+ }
+ 
+ static void efx_tc_free_action_set(struct efx_nic *efx,
+-				   struct efx_tc_action_set *act, bool in_hw)
++				   struct efx_tc_action_set *act, bool in_hw,
++				   int *mcdi_cnt)
+ {
++	int mcnt = 0;
++
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
++
+ 	/* Failure paths calling this on the 'running action' set in_hw=false,
+ 	 * because if the alloc had succeeded we'd've put it in acts.list and
+ 	 * not still have it in act.
+@@ -1079,45 +1122,60 @@ static void efx_tc_free_action_set(struct efx_nic *efx,
+ 		 * remove ourselves from that list before we are freed.
+ 		 */
+ 		list_del(&act->list);
++		mcnt++;
+ 	}
+ 	if (act->count) {
+ 		spin_lock_bh(&act->count->cnt->lock);
+ 		if (!list_empty(&act->count_user))
+ 			list_del(&act->count_user);
+ 		spin_unlock_bh(&act->count->cnt->lock);
+-		efx_tc_flower_put_counter_index(efx, act->count);
++		efx_tc_flower_put_counter_index(efx, act->count, &mcnt);
+ 	}
+ 	if (act->encap_md) {
+ 		list_del(&act->encap_user);
+-		efx_tc_flower_release_encap_md(efx, act->encap_md);
++		efx_tc_flower_release_encap_md(efx, act->encap_md, &mcnt);
+ 	}
+ 	if (act->src_mac)
+ 		efx_tc_flower_put_mac(efx, act->src_mac);
+ 	if (act->dst_mac)
+ 		efx_tc_flower_put_mac(efx, act->dst_mac);
+ 	kfree(act);
++
++	if (mcdi_cnt)
++		*mcdi_cnt = mcnt;
+ }
+ 
+ static void efx_tc_free_action_set_list(struct efx_nic *efx,
+ 					struct efx_tc_action_set_list *acts,
+-					bool in_hw)
++					bool in_hw,
++					int *mcdi_cnt)
+ {
+ 	struct efx_tc_action_set *act, *next;
++	int mcnt = 0;
++
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
+ 
+ 	/* Failure paths set in_hw=false, because usually the acts didn't get
+ 	 * to efx_mae_alloc_action_set_list(); if they did, the failure tree
+ 	 * has a separate efx_mae_free_action_set_list() before calling us.
+ 	 */
+-	if (in_hw)
++	if (in_hw) {
+ 		efx_mae_free_action_set_list(efx, acts);
++		mcnt++;
++	}
+ 	/* Any act that's on the list will be in_hw even if the list isn't */
+ 	list_for_each_entry_safe(act, next, &acts->list, list)
+-		efx_tc_free_action_set(efx, act, true);
++		efx_tc_free_action_set(efx, act, true, &mcnt);
+ 	/* Don't kfree, as acts is embedded inside a struct efx_tc_flow_rule */
++
++	if (mcdi_cnt)
++		*mcdi_cnt = mcnt;
+ }
+ 
+ static void efx_tc_flower_release_encap_match(struct efx_nic *efx,
+-					      struct efx_tc_encap_match *encap);
++					      struct efx_tc_encap_match *encap,
++					      int *mcdi_cnt);
+ 
+ #if !defined(EFX_USE_KCOMPAT) || defined(EFX_CONNTRACK_OFFLOAD)
+ #if IS_ENABLED(CONFIG_NF_FLOW_TABLE)
+@@ -1161,7 +1219,8 @@ static void efx_tc_ct_free(void *ptr, void *arg)
+ }
+ 
+ static void efx_tc_ct_unregister_zone(struct efx_nic *efx,
+-				      struct efx_tc_ct_zone *ct_zone);
++				      struct efx_tc_ct_zone *ct_zone,
++				      int *mdi_cnt);
+ #endif
+ 
+ static void efx_tc_lhs_free(void *ptr, void *arg)
+@@ -1175,10 +1234,10 @@ static void efx_tc_lhs_free(void *ptr, void *arg)
+ 
+ #if !defined(EFX_USE_KCOMPAT) || defined(EFX_CONNTRACK_OFFLOAD)
+ 	if (rule->lhs_act.zone)
+-		efx_tc_ct_unregister_zone(efx, rule->lhs_act.zone);
++		efx_tc_ct_unregister_zone(efx, rule->lhs_act.zone, NULL);
+ #endif
+ 	if (rule->lhs_act.count)
+-		efx_tc_flower_put_counter_index(efx, rule->lhs_act.count);
++		efx_tc_flower_put_counter_index(efx, rule->lhs_act.count, NULL);
+ 	efx_mae_remove_lhs_rule(efx, rule);
+ 
+ 	kfree(rule);
+@@ -1196,9 +1255,9 @@ static void efx_tc_flow_free(void *ptr, void *arg)
+ 	efx_mae_delete_rule(efx, rule->fw_id);
+ 
+ 	/* Release entries in subsidiary tables */
+-	efx_tc_free_action_set_list(efx, &rule->acts, true);
++	efx_tc_free_action_set_list(efx, &rule->acts, true, NULL);
+ 	if (rule->match.encap)
+-		efx_tc_flower_release_encap_match(efx, rule->match.encap);
++		efx_tc_flower_release_encap_match(efx, rule->match.encap, NULL);
+ 
+ 	kfree(rule);
+ }
+@@ -2158,12 +2217,16 @@ static int efx_tc_flower_record_encap_match(struct efx_nic *efx,
+ 					    struct efx_tc_match *match,
+ 					    enum efx_encap_type type,
+ 					    enum efx_tc_em_pseudo_type em_type,
+-					    u8 child_ip_tos_mask)
++					    u8 child_ip_tos_mask, int *mcdi_cnt)
+ {
+ 	struct efx_tc_encap_match *encap, *old, *pseudo = NULL;
+ 	unsigned char ipv;
++	int mcnt = 0;
+ 	int rc;
+ 
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
++
+ 	/* We require that the socket-defining fields (IP addrs and UDP dest
+ 	 * port) are present and exact-match.  Other fields are currently not
+ 	 * allowed.  This meets what OVS will ask for, and means that we don't
+@@ -2220,7 +2283,7 @@ static int efx_tc_flower_record_encap_match(struct efx_nic *efx,
+ 		pmatch.mask.enc_ip_tos = 0;
+ 		rc = efx_tc_flower_record_encap_match(efx, &pmatch, type,
+ 						      EFX_TC_EM_PSEUDO_TOS,
+-						      match->mask.enc_ip_tos);
++						      match->mask.enc_ip_tos, mcdi_cnt);
+ 		if (rc)
+ 			return rc;
+ 		pseudo = pmatch.encap;
+@@ -2346,6 +2409,9 @@ static int efx_tc_flower_record_encap_match(struct efx_nic *efx,
+ 				goto fail;
+ 			}
+ 		}
++		mcnt++;
++		if (mcdi_cnt)
++			*mcdi_cnt = mcnt;
+ 		netif_dbg(efx, drv, efx->net_dev, "Recorded %s\n", buf);
+ 		refcount_set(&encap->ref, 1);
+ 	}
+@@ -2357,20 +2423,25 @@ fail:
+ 	kfree(encap);
+ fail_pseudo:
+ 	if (pseudo)
+-		efx_tc_flower_release_encap_match(efx, pseudo);
++		efx_tc_flower_release_encap_match(efx, pseudo, mcdi_cnt);
+ 	return rc;
+ }
+ 
+ static void efx_tc_flower_release_encap_match(struct efx_nic *efx,
+-					      struct efx_tc_encap_match *encap)
++					      struct efx_tc_encap_match *encap,
++					      int *mcdi_cnt)
+ {
+ 	unsigned char ipv = 4;
+ 	char buf[192];
++	int mcnt = 0;
+ 	int rc;
+ 
+ 	if (!refcount_dec_and_test(&encap->ref))
+ 		return; /* still in use */
+ 
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
++
+ #ifdef CONFIG_IPV6
+ 	if (!(encap->src_ip | encap->dst_ip))
+ 		ipv = 6;
+@@ -2388,13 +2459,16 @@ static void efx_tc_flower_release_encap_match(struct efx_nic *efx,
+ 				  "Failed to release %s, rc %d\n", buf, rc);
+ 		else
+ 			netif_dbg(efx, drv, efx->net_dev, "Released %s\n", buf);
++		mcnt++;
++		if (mcdi_cnt)
++			*mcdi_cnt = mcnt;
+ 	} else {
+ 		netif_dbg(efx, drv, efx->net_dev, "Released %s\n", buf);
+ 	}
+ 	rhashtable_remove_fast(&efx->tc->encap_match_ht, &encap->linkage,
+ 			       efx_tc_encap_match_ht_params);
+ 	if (encap->pseudo)
+-		efx_tc_flower_release_encap_match(efx, encap->pseudo);
++		efx_tc_flower_release_encap_match(efx, encap->pseudo, mcdi_cnt);
+ 	kfree(encap);
+ }
+ 
+@@ -2785,6 +2859,40 @@ static int efx_tc_ct_mangle(struct efx_nic *efx, struct efx_tc_ct_entry *conn,
+ 	return 0;
+ }
+ 
++#define LATENCIES_CT_ADD \
++	efx->tc->offload_lat[EFX_OFFLOAD_LAT_CT_ADD]
++#define LATENCIES_CT_DEL \
++	efx->tc->offload_lat[EFX_OFFLOAD_LAT_CT_DEL]
++
++#define LAT_TC_ADD EFX_OFFLOAD_LAT_TC_1M_ADD
++#define LAT_TC_DEL EFX_OFFLOAD_LAT_TC_1M_DEL
++
++#define LATENCIES(base) \
++	efx->tc->offload_lat[base]
++
++static void efx_tc_ct_lat_finish(struct efx_nic *efx, u64 tstart, int base,
++				 int lat_type_inx)
++{
++	u64 tend;
++
++	tend = ktime_get_ns();
++	tend -= tstart;
++
++	/* Check index given is not out of bounds */
++	if ((base < EFX_OFFLOAD_LAT_CT_ADD) && (lat_type_inx > 4)) {
++		WARN_ON_ONCE(lat_type_inx > 4);
++		return;
++	}
++
++	base += lat_type_inx;
++
++	if (tend > LATENCIES(base).max_latency)
++		LATENCIES(base).max_latency = tend;
++
++	atomic64_add(tend, &LATENCIES(base).total_added_latencies);
++	atomic64_inc(&LATENCIES(base).total_count_latencies);
++}
++
+ static int efx_tc_ct_replace(struct efx_tc_ct_zone *ct_zone,
+ 			     struct flow_cls_offload *tc)
+ {
+@@ -2794,6 +2902,7 @@ static int efx_tc_ct_replace(struct efx_tc_ct_zone *ct_zone,
+ 	struct efx_nic *efx = ct_zone->efx;
+ 	const struct flow_action_entry *fa;
+ 	struct efx_tc_counter *cnt;
++	u64 tstart;
+ 	int rc, i;
+ 
+ 	if (WARN_ON(!efx->tc))
+@@ -2801,6 +2910,8 @@ static int efx_tc_ct_replace(struct efx_tc_ct_zone *ct_zone,
+ 	if (WARN_ON(!efx->tc->up))
+ 		return -ENETDOWN;
+ 
++	tstart = ktime_get_ns();
++
+ 	conn = kzalloc(sizeof(*conn), GFP_USER);
+ 	if (!conn)
+ 		return -ENOMEM;
+@@ -2871,6 +2982,10 @@ static int efx_tc_ct_replace(struct efx_tc_ct_zone *ct_zone,
+ 	down_write(&ct_zone->rwsem);
+ 	list_add_tail(&conn->list, &ct_zone->cts);
+ 	up_write(&ct_zone->rwsem);
++
++	/* CT offloads take always the same amount of MCDI commands */
++	efx_tc_ct_lat_finish(efx, tstart, EFX_OFFLOAD_LAT_CT_ADD, 0);
++
+ 	return 0;
+ release:
+ 	if (conn->cnt)
+@@ -2927,6 +3042,9 @@ static int efx_tc_ct_destroy(struct efx_tc_ct_zone *ct_zone,
+ {
+ 	struct efx_nic *efx = ct_zone->efx;
+ 	struct efx_tc_ct_entry *conn;
++	u64 tstart;
++
++	tstart = ktime_get_ns();
+ 
+ 	conn = rhashtable_lookup_fast(&efx->tc->ct_ht, &tc->cookie,
+ 				      efx_tc_ct_ht_params);
+@@ -2938,10 +3056,14 @@ static int efx_tc_ct_destroy(struct efx_tc_ct_zone *ct_zone,
+ 
+ 	down_write(&ct_zone->rwsem);
+ 	list_del(&conn->list);
+-	efx_tc_ct_remove(efx, conn);
+ 	up_write(&ct_zone->rwsem);
++	efx_tc_ct_remove(efx, conn);
+ 	synchronize_rcu();
+ 	efx_tc_ct_remove_finish(efx, conn);
++
++	/* CT offloads take always the same amount of MCDI commands */
++	efx_tc_ct_lat_finish(efx, tstart, EFX_OFFLOAD_LAT_CT_DEL, 0);
++
+ 	return 0;
+ }
+ 
+@@ -3059,9 +3181,14 @@ fail1:
+ }
+ 
+ static void efx_tc_ct_unregister_zone(struct efx_nic *efx,
+-				      struct efx_tc_ct_zone *ct_zone)
++				      struct efx_tc_ct_zone *ct_zone,
++				      int *mcdi_cnt)
+ {
+ 	struct efx_tc_ct_entry *conn, *next;
++	int mcnt = 0;
++
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
+ 
+ 	if (!refcount_dec_and_test(&ct_zone->ref))
+ 		return; /* still in use */
+@@ -3069,17 +3196,23 @@ static void efx_tc_ct_unregister_zone(struct efx_nic *efx,
+ 	rhashtable_remove_fast(&efx->tc->ct_zone_ht, &ct_zone->linkage,
+ 			       efx_tc_ct_zone_ht_params);
+ 	down_write(&ct_zone->rwsem);
+-	list_for_each_entry(conn, &ct_zone->cts, list)
++	list_for_each_entry(conn, &ct_zone->cts, list) {
+ 		efx_tc_ct_remove(efx, conn);
++		mcnt++;
++	}
+ 	synchronize_rcu();
+ 	/* _safe because efx_tc_ct_remove_finish() frees conn */
+-	list_for_each_entry_safe(conn, next, &ct_zone->cts, list)
++	list_for_each_entry_safe(conn, next, &ct_zone->cts, list) {
+ 		efx_tc_ct_remove_finish(efx, conn);
++		mcnt++;
++	}
+ 	up_write(&ct_zone->rwsem);
+ 	ida_free(&efx->tc->domain_ida, ct_zone->domain);
+ 	netif_dbg(efx, drv, efx->net_dev, "Removed ct_zone for %u@%u\n",
+ 		  ct_zone->zone, ct_zone->vni_mode);
+ 	kfree(ct_zone);
++	if (mcdi_cnt)
++		*mcdi_cnt = mcnt;
+ }
+ #else
+ static struct efx_tc_ct_zone *efx_tc_ct_register_zone(struct efx_nic *efx,
+@@ -3090,7 +3223,8 @@ static struct efx_tc_ct_zone *efx_tc_ct_register_zone(struct efx_nic *efx,
+ }
+ 
+ static void efx_tc_ct_unregister_zone(struct efx_nic *efx,
+-				      struct efx_tc_ct_zone *ct_zone) {}
++				      struct efx_tc_ct_zone *ct_zone,
++				      int *mcdi_cnt) {}
+ #endif /* CONFIG_NF_FLOW_TABLE */
+ #endif
+ 
+@@ -3175,7 +3309,8 @@ static int efx_tc_flower_handle_lhs_actions(struct efx_nic *efx,
+ 					    struct flow_cls_offload *tc,
+ 					    struct flow_rule *fr,
+ 					    struct net_device *net_dev,
+-					    struct efx_tc_lhs_rule *rule)
++					    struct efx_tc_lhs_rule *rule,
++					    int *mcdi_cnt)
+ 
+ {
+ #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_TC_FLOW_OFFLOAD) || defined(EFX_HAVE_TCF_EXTACK)
+@@ -3187,8 +3322,12 @@ static int efx_tc_flower_handle_lhs_actions(struct efx_nic *efx,
+ 	const struct flow_action_entry *fa;
+ 	enum efx_tc_counter_type ctype;
+ 	bool pipe = true;
++	int mcnt = 0;
+ 	int i;
+ 
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
++
+ 	ctype = rule->is_ar ? EFX_TC_COUNTER_TYPE_AR : EFX_TC_COUNTER_TYPE_OR;
+ 
+ 	flow_action_for_each(i, fa, &fr->action) {
+@@ -3223,7 +3362,11 @@ static int efx_tc_flower_handle_lhs_actions(struct efx_nic *efx,
+ #else
+ 							      tc->cookie,
+ #endif
+-							      ctype);
++							      ctype,
++							      &mcnt);
++			if (mcdi_cnt)
++				*mcdi_cnt = mcnt;
++
+ 			if (IS_ERR(cnt)) {
+ 				EFX_TC_ERR_MSG(efx, extack, "Failed to obtain a counter");
+ 				return PTR_ERR(cnt);
+@@ -3289,16 +3432,17 @@ static int efx_tc_flower_handle_lhs_actions(struct efx_nic *efx,
+ }
+ 
+ static void efx_tc_flower_release_lhs_actions(struct efx_nic *efx,
+-					      struct efx_tc_lhs_action *act)
++					      struct efx_tc_lhs_action *act,
++					      int *mcdi_cnt)
+ {
+ 	if (act->rid)
+ 		efx_tc_put_recirc_id(efx, act->rid);
+ #if !defined(EFX_USE_KCOMPAT) || defined(EFX_CONNTRACK_OFFLOAD)
+ 	if (act->zone)
+-		efx_tc_ct_unregister_zone(efx, act->zone);
++		efx_tc_ct_unregister_zone(efx, act->zone, mcdi_cnt);
+ #endif
+ 	if (act->count)
+-		efx_tc_flower_put_counter_index(efx, act->count);
++		efx_tc_flower_put_counter_index(efx, act->count, mcdi_cnt);
+ }
+ 
+ static int efx_tc_flower_replace_foreign_lhs_ar(struct efx_nic *efx,
+@@ -3314,8 +3458,12 @@ static int efx_tc_flower_replace_foreign_lhs_ar(struct efx_nic *efx,
+ #endif
+ 	struct efx_tc_lhs_rule *rule, *old;
+ 	enum efx_encap_type type;
++	int mcdi_cnt = 0;
++	u64 tstart;
+ 	int rc;
+ 
++	tstart = ktime_get_ns();
++
+ #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_FLOW_INDR_BLOCK_CB_REGISTER) || defined(EFX_HAVE_FLOW_INDR_DEV_REGISTER)
+ 	type = efx_tc_indr_netdev_type(net_dev);
+ #else
+@@ -3341,7 +3489,7 @@ static int efx_tc_flower_replace_foreign_lhs_ar(struct efx_nic *efx,
+ 		return rc;
+ 	}
+ 	rc = efx_tc_flower_record_encap_match(efx, match, type,
+-					      EFX_TC_EM_DIRECT, 0);
++					      EFX_TC_EM_DIRECT, 0, &mcdi_cnt);
+ 	if (rc)
+ 		return rc;
+ 
+@@ -3388,7 +3536,7 @@ static int efx_tc_flower_replace_foreign_lhs_ar(struct efx_nic *efx,
+ 	}
+ 
+ 	/* Parse actions */
+-	rc = efx_tc_flower_handle_lhs_actions(efx, tc, fr, net_dev, rule);
++	rc = efx_tc_flower_handle_lhs_actions(efx, tc, fr, net_dev, rule, &mcdi_cnt);
+ 	if (rc)
+ 		goto release;
+ 
+@@ -3403,17 +3551,24 @@ static int efx_tc_flower_replace_foreign_lhs_ar(struct efx_nic *efx,
+ 	netif_dbg(efx, drv, efx->net_dev,
+ 		  "Successfully parsed lhs rule (cookie %lx)\n",
+ 		  tc->cookie);
++	mcdi_cnt++;
++	/* The next function receive mcdi_cnt as an index, so previous increment
++	 * and the next decrement will be avoided by the compiler but it is
++	 * better to keep it in the code for clarity.
++	 */
++	efx_tc_ct_lat_finish(efx, tstart, LAT_TC_ADD, mcdi_cnt - 1);
++
+ 	return 0;
+ 
+ release:
+-	efx_tc_flower_release_lhs_actions(efx, &rule->lhs_act);
++	efx_tc_flower_release_lhs_actions(efx, &rule->lhs_act, &mcdi_cnt);
+ 	if (!old)
+ 		rhashtable_remove_fast(&efx->tc->lhs_rule_ht, &rule->linkage,
+ 				       efx_tc_lhs_rule_ht_params);
+ 	kfree(rule);
+ release_encap_match:
+ 	if (match->encap)
+-		efx_tc_flower_release_encap_match(efx, match->encap);
++		efx_tc_flower_release_encap_match(efx, match->encap, &mcdi_cnt);
+ 	return rc;
+ }
+ 
+@@ -3430,8 +3585,12 @@ static int efx_tc_flower_replace_foreign_lhs(struct efx_nic *efx,
+ #endif
+ 	struct efx_tc_lhs_rule *rule, *old;
+ 	enum efx_encap_type type;
++	int mcdi_cnt = 0;
++	u64 tstart;
+ 	int rc;
+ 
++	tstart = ktime_get_ns();
++
+ 	if (tc->common.chain_index) {
+ 		EFX_TC_ERR_MSG(efx, extack, "LHS rule only allowed in chain 0");
+ 		return -EOPNOTSUPP;
+@@ -3472,7 +3631,7 @@ static int efx_tc_flower_replace_foreign_lhs(struct efx_nic *efx,
+ 		return rc;
+ 	}
+ 	rc = efx_tc_flower_record_encap_match(efx, match, type,
+-					      EFX_TC_EM_PSEUDO_OR, 0);
++					      EFX_TC_EM_PSEUDO_OR, 0, &mcdi_cnt);
+ 	if (rc)
+ 		return rc;
+ 
+@@ -3513,7 +3672,7 @@ static int efx_tc_flower_replace_foreign_lhs(struct efx_nic *efx,
+ 	}
+ 
+ 	/* Parse actions */
+-	rc = efx_tc_flower_handle_lhs_actions(efx, tc, fr, net_dev, rule);
++	rc = efx_tc_flower_handle_lhs_actions(efx, tc, fr, net_dev, rule, &mcdi_cnt);
+ 	if (rc)
+ 		goto release;
+ 
+@@ -3525,20 +3684,27 @@ static int efx_tc_flower_replace_foreign_lhs(struct efx_nic *efx,
+ 		EFX_TC_ERR_MSG(efx, extack, "Failed to insert rule in hw");
+ 		goto release;
+ 	}
++	mcdi_cnt++;
++	/* The next function receive mcdi_cnt as an index, so previous increment
++	 * and the next decrement will be avoided by the compiler but it is
++	 * better to keep it in the code for clarity.
++	 */
++	efx_tc_ct_lat_finish(efx, tstart, LAT_TC_DEL, mcdi_cnt - 1);
++
+ 	netif_dbg(efx, drv, efx->net_dev,
+ 		  "Successfully parsed lhs rule (cookie %lx)\n",
+ 		  tc->cookie);
+ 	return 0;
+ 
+ release:
+-	efx_tc_flower_release_lhs_actions(efx, &rule->lhs_act);
++	efx_tc_flower_release_lhs_actions(efx, &rule->lhs_act, &mcdi_cnt);
+ 	if (!old)
+ 		rhashtable_remove_fast(&efx->tc->lhs_rule_ht, &rule->linkage,
+ 				       efx_tc_lhs_rule_ht_params);
+ 	kfree(rule);
+ release_encap_match:
+ 	if (match->encap)
+-		efx_tc_flower_release_encap_match(efx, match->encap);
++		efx_tc_flower_release_encap_match(efx, match->encap, &mcdi_cnt);
+ 	return rc;
+ }
+ 
+@@ -3558,9 +3724,13 @@ static int efx_tc_flower_replace_foreign(struct efx_nic *efx,
+ 	struct efx_tc_recirc_id *rid;
+ 	struct efx_tc_match match;
+ 	struct efx_rep *to_efv;
++	int mcdi_cnt = 0;
++	u64 tstart;
+ 	s64 rc;
+ 	int i;
+ 
++	tstart = ktime_get_ns();
++
+ #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_TC_FLOW_OFFLOAD)
+ 	fr = efx_compat_flow_rule_build(tc);
+ 	if (IS_ERR(fr)) {
+@@ -3695,7 +3865,7 @@ static int efx_tc_flower_replace_foreign(struct efx_nic *efx,
+ 		}
+ 
+ 		rc = efx_tc_flower_record_encap_match(efx, &match, type,
+-						      EFX_TC_EM_DIRECT, 0);
++						      EFX_TC_EM_DIRECT, 0, &mcdi_cnt);
+ 		if (rc)
+ 			goto release;
+ 	} else if (!tc->common.chain_index) {
+@@ -3762,7 +3932,8 @@ static int efx_tc_flower_replace_foreign(struct efx_nic *efx,
+ #else
+ 									      tc->cookie,
+ #endif
+-									      EFX_TC_COUNTER_TYPE_AR);
++									      EFX_TC_COUNTER_TYPE_AR,
++									      &mcdi_cnt);
+ 					if (IS_ERR(ctr)) {
+ 						rc = PTR_ERR(ctr);
+ 						goto release;
+@@ -3803,6 +3974,7 @@ static int efx_tc_flower_replace_foreign(struct efx_nic *efx,
+ 			rc = efx_mae_alloc_action_set(efx, act);
+ 			if (rc)
+ 				goto release;
++			mcdi_cnt++;
+ 			list_add_tail(&act->list, &rule->acts.list);
+ 			act = NULL;
+ 			if (fa->id == FLOW_ACTION_REDIRECT)
+@@ -3845,6 +4017,7 @@ static int efx_tc_flower_replace_foreign(struct efx_nic *efx,
+ 		rc = efx_mae_alloc_action_set(efx, act);
+ 		if (rc)
+ 			goto release;
++		mcdi_cnt++;
+ 		list_add_tail(&act->list, &rule->acts.list);
+ 		act = NULL; /* Prevent double-free in error path */
+ 	}
+@@ -3864,6 +4037,7 @@ static int efx_tc_flower_replace_foreign(struct efx_nic *efx,
+ 	rc = efx_mae_alloc_action_set_list(efx, &rule->acts);
+ 	if (rc)
+ 		goto release;
++	mcdi_cnt++;
+ 	rc = efx_mae_insert_rule(efx, &rule->match, EFX_TC_PRIO_TC,
+ 				 rule->acts.fw_id, &rule->fw_id);
+ 	if (rc)
+@@ -3871,6 +4045,13 @@ static int efx_tc_flower_replace_foreign(struct efx_nic *efx,
+ #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_TC_FLOW_OFFLOAD)
+ 	kfree(fr);
+ #endif
++	mcdi_cnt++;
++	/* The next function receive mcdi_cnt as an index, so previous increment
++	 * and the next decrement will be avoided by the compiler but it is
++	 * better to keep it in the code for clarity.
++	 */
++	efx_tc_ct_lat_finish(efx, tstart, LAT_TC_ADD, mcdi_cnt - 1);
++
+ 	return 0;
+ 
+ release_act:
+@@ -3882,16 +4063,16 @@ release:
+ 	if (match.rid)
+ 		efx_tc_put_recirc_id(efx, match.rid);
+ 	if (act)
+-		efx_tc_free_action_set(efx, act, false);
++		efx_tc_free_action_set(efx, act, false, &mcdi_cnt);
+ 	if (rule) {
+ 		rhashtable_remove_fast(&efx->tc->match_action_ht,
+ 				       &rule->linkage,
+ 				       efx_tc_match_action_ht_params);
+-		efx_tc_free_action_set_list(efx, &rule->acts, false);
++		efx_tc_free_action_set_list(efx, &rule->acts, false, &mcdi_cnt);
+ 	}
+ 	kfree(rule);
+ 	if (match.encap)
+-		efx_tc_flower_release_encap_match(efx, match.encap);
++		efx_tc_flower_release_encap_match(efx, match.encap, &mcdi_cnt);
+ #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_TC_FLOW_OFFLOAD)
+ 	kfree(fr);
+ #endif
+@@ -3911,8 +4092,12 @@ static int efx_tc_flower_replace_lhs(struct efx_nic *efx,
+ 	struct netlink_ext_ack *extack = NULL;
+ #endif
+ 	struct efx_tc_lhs_rule *rule, *old;
++	int mcdi_cnt = 0;
++	u64 tstart;
+ 	int rc;
+ 
++	tstart = ktime_get_ns();
++
+ 	if (tc->common.chain_index) {
+ 		EFX_TC_ERR_MSG(efx, extack, "LHS rule only allowed in chain 0");
+ 		return -EOPNOTSUPP;
+@@ -3956,7 +4141,7 @@ static int efx_tc_flower_replace_lhs(struct efx_nic *efx,
+ 	 * and that's not likely to be the main cause of recirc_id
+ 	 * exhaustion anyway.)
+ 	 */
+-	rc = efx_tc_flower_handle_lhs_actions(efx, tc, fr, efx->net_dev, rule);
++	rc = efx_tc_flower_handle_lhs_actions(efx, tc, fr, efx->net_dev, rule, &mcdi_cnt);
+ 	if (rc)
+ 		goto release;
+ 
+@@ -3967,13 +4152,20 @@ static int efx_tc_flower_replace_lhs(struct efx_nic *efx,
+ 		EFX_TC_ERR_MSG(efx, extack, "Failed to insert rule in hw");
+ 		goto release;
+ 	}
++	mcdi_cnt++;
++	/* The next function receive mcdi_cnt as an index, so previous increment
++	 * and the next decrement will be avoided by the compiler but it is
++	 * better to keep it in the code for clarity.
++	 */
++	efx_tc_ct_lat_finish(efx, tstart, LAT_TC_ADD, mcdi_cnt - 1);
++
+ 	netif_dbg(efx, drv, efx->net_dev,
+ 		  "Successfully parsed lhs rule (cookie %lx)\n",
+ 		  tc->cookie);
+ 	return 0;
+ 
+ release:
+-	efx_tc_flower_release_lhs_actions(efx, &rule->lhs_act);
++	efx_tc_flower_release_lhs_actions(efx, &rule->lhs_act, &mcdi_cnt);
+ 	if (!old)
+ 		rhashtable_remove_fast(&efx->tc->lhs_rule_ht, &rule->linkage,
+ 				       efx_tc_lhs_rule_ht_params);
+@@ -4308,10 +4500,14 @@ static int efx_tc_flower_replace(struct efx_nic *efx,
+ 	struct efx_rep *from_efv, *to_efv;
+ 	struct efx_tc_recirc_id *rid;
+ 	struct efx_tc_match match;
++	int mcdi_cnt = 0;
+ 	u32 acts_id;
++	u64 tstart;
+ 	s64 rc;
+ 	int i;
+ 
++	tstart = ktime_get_ns();
++
+ 	if (!tc_can_offload_extack(efx->net_dev, extack))
+ 		return -EOPNOTSUPP;
+ 	if (WARN_ON(!efx->tc))
+@@ -4508,7 +4704,8 @@ static int efx_tc_flower_replace(struct efx_nic *efx,
+ #else
+ 							      tc->cookie,
+ #endif
+-							      EFX_TC_COUNTER_TYPE_AR);
++							      EFX_TC_COUNTER_TYPE_AR,
++							      &mcdi_cnt);
+ 			if (IS_ERR(ctr)) {
+ 				rc = PTR_ERR(ctr);
+ 				EFX_TC_ERR_MSG(efx, extack, "Failed to obtain a counter");
+@@ -4528,6 +4725,7 @@ static int efx_tc_flower_replace(struct efx_nic *efx,
+ 				EFX_TC_ERR_MSG(efx, extack, "Failed to write action set to hw (drop)");
+ 				goto release;
+ 			}
++			mcdi_cnt++;
+ 			list_add_tail(&act->list, &rule->acts.list);
+ 			act = NULL; /* end of the line */
+ 			break;
+@@ -4545,7 +4743,7 @@ static int efx_tc_flower_replace(struct efx_nic *efx,
+ 					goto release;
+ 				}
+ 				encap = efx_tc_flower_create_encap_md(
+-						efx, encap_info, fa->dev, extack);
++						efx, encap_info, fa->dev, extack, &mcdi_cnt);
+ 				if (IS_ERR_OR_NULL(encap)) {
+ 					rc = PTR_ERR(encap);
+ 					if (!rc)
+@@ -4572,6 +4770,7 @@ static int efx_tc_flower_replace(struct efx_nic *efx,
+ 					EFX_TC_ERR_MSG(efx, extack, "Failed to write action set to hw (encap)");
+ 					goto release;
+ 				}
++				mcdi_cnt++;
+ 				list_add_tail(&act->list, &rule->acts.list);
+ 				act->user = &rule->acts;
+ 				act = NULL;
+@@ -4612,6 +4811,7 @@ static int efx_tc_flower_replace(struct efx_nic *efx,
+ 				EFX_TC_ERR_MSG(efx, extack, "Failed to write action set to hw (mirred)");
+ 				goto release;
+ 			}
++			mcdi_cnt++;
+ 			list_add_tail(&act->list, &rule->acts.list);
+ 			act = NULL;
+ 			if (fa->id == FLOW_ACTION_REDIRECT)
+@@ -4770,6 +4970,7 @@ static int efx_tc_flower_replace(struct efx_nic *efx,
+ 			EFX_TC_ERR_MSG(efx, extack, "Failed to write action set to hw (deliver)");
+ 			goto release;
+ 		}
++		mcdi_cnt++;
+ 		list_add_tail(&act->list, &rule->acts.list);
+ 		act = NULL; /* Prevent double-free in error path */
+ 	}
+@@ -4791,6 +4992,7 @@ static int efx_tc_flower_replace(struct efx_nic *efx,
+ 		EFX_TC_ERR_MSG(efx, extack, "Failed to write action set list to hw");
+ 		goto release;
+ 	}
++	mcdi_cnt++;
+ 	if (from_efv == EFX_EFV_PF)
+ 		/* PF netdev, so rule applies to traffic from wire */
+ 		rule->fallback = &efx->tc->facts.pf;
+@@ -4813,6 +5015,13 @@ static int efx_tc_flower_replace(struct efx_nic *efx,
+ #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_TC_FLOW_OFFLOAD)
+ 	kfree(fr);
+ #endif
++	mcdi_cnt++;
++	/* The next function receive mcdi_cnt as an index, so previous increment
++	 * and the next decrement will be avoided by the compiler but it is
++	 * better to keep it in the code for clarity.
++	 */
++	efx_tc_ct_lat_finish(efx, tstart, LAT_TC_ADD, mcdi_cnt - 1);
++
+ 	return 0;
+ 
+ release_acts:
+@@ -4824,12 +5033,12 @@ release:
+ 	if (match.rid)
+ 		efx_tc_put_recirc_id(efx, match.rid);
+ 	if (act)
+-		efx_tc_free_action_set(efx, act, false);
++		efx_tc_free_action_set(efx, act, false, &mcdi_cnt);
+ 	if (rule) {
+ 		rhashtable_remove_fast(&efx->tc->match_action_ht,
+ 				       &rule->linkage,
+ 				       efx_tc_match_action_ht_params);
+-		efx_tc_free_action_set_list(efx, &rule->acts, false);
++		efx_tc_free_action_set_list(efx, &rule->acts, false, &mcdi_cnt);
+ 	}
+ 	kfree(rule);
+ #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_TC_FLOW_OFFLOAD)
+@@ -4838,17 +5047,27 @@ release:
+ 	return rc;
+ }
+ 
+-static void efx_tc_delete_rule(struct efx_nic *efx, struct efx_tc_flow_rule *rule)
++static void efx_tc_delete_rule(struct efx_nic *efx, struct efx_tc_flow_rule *rule,
++			       int *mcdi_cnt)
+ {
++	int mcnt;
++
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
++
+ 	efx_mae_delete_rule(efx, rule->fw_id);
++	mcnt++;
+ 
+ 	/* Release entries in subsidiary tables */
+-	efx_tc_free_action_set_list(efx, &rule->acts, true);
++	efx_tc_free_action_set_list(efx, &rule->acts, true, &mcnt);
+ 	if (rule->match.rid)
+ 		efx_tc_put_recirc_id(efx, rule->match.rid);
+ 	if (rule->match.encap)
+-		efx_tc_flower_release_encap_match(efx, rule->match.encap);
++		efx_tc_flower_release_encap_match(efx, rule->match.encap, &mcnt);
+ 	rule->fw_id = MC_CMD_MAE_ACTION_RULE_INSERT_OUT_ACTION_RULE_ID_NULL;
++
++	if (mcdi_cnt)
++		*mcdi_cnt = mcnt;
+ }
+ 
+ static int efx_tc_flower_destroy(struct efx_nic *efx,
+@@ -4862,21 +5081,27 @@ static int efx_tc_flower_destroy(struct efx_nic *efx,
+ #endif
+ 	struct efx_tc_lhs_rule *lhs_rule;
+ 	struct efx_tc_flow_rule *rule;
++	int mcdi_cnt = 0;
++	u64 tstart;
++
++	tstart = ktime_get_ns();
+ 
+ 	lhs_rule = rhashtable_lookup_fast(&efx->tc->lhs_rule_ht, &tc->cookie,
+ 					  efx_tc_lhs_rule_ht_params);
+ 	if (lhs_rule) {
+ 		/* Remove it from HW */
+ 		efx_mae_remove_lhs_rule(efx, lhs_rule);
++		mcdi_cnt++;
+ 		/* Delete it from SW */
+-		efx_tc_flower_release_lhs_actions(efx, &lhs_rule->lhs_act);
++		efx_tc_flower_release_lhs_actions(efx, &lhs_rule->lhs_act, &mcdi_cnt);
+ 		rhashtable_remove_fast(&efx->tc->lhs_rule_ht, &lhs_rule->linkage,
+ 				       efx_tc_lhs_rule_ht_params);
+ 		if (lhs_rule->match.encap)
+-			efx_tc_flower_release_encap_match(efx, lhs_rule->match.encap);
++			efx_tc_flower_release_encap_match(efx, lhs_rule->match.encap, &mcdi_cnt);
+ 		netif_dbg(efx, drv, efx->net_dev, "Removed (lhs) filter %lx\n",
+ 			  lhs_rule->cookie);
+ 		kfree(lhs_rule);
++		efx_tc_ct_lat_finish(efx, tstart, LAT_TC_DEL, mcdi_cnt - 1);
+ 		return 0;
+ 	}
+ 
+@@ -4896,12 +5121,13 @@ static int efx_tc_flower_destroy(struct efx_nic *efx,
+ 	}
+ 
+ 	/* Remove it from HW */
+-	efx_tc_delete_rule(efx, rule);
++	efx_tc_delete_rule(efx, rule, &mcdi_cnt);
+ 	/* Delete it from SW */
+ 	rhashtable_remove_fast(&efx->tc->match_action_ht, &rule->linkage,
+ 			       efx_tc_match_action_ht_params);
+ 	netif_dbg(efx, drv, efx->net_dev, "Removed filter %lx\n", rule->cookie);
+ 	kfree(rule);
++	efx_tc_ct_lat_finish(efx, tstart, LAT_TC_DEL, mcdi_cnt - 1);
+ 	return 0;
+ }
+ 
+@@ -5383,7 +5609,7 @@ void efx_tc_deconfigure_default_rule(struct efx_nic *efx,
+ 				     struct efx_tc_flow_rule *rule)
+ {
+ 	if (rule->fw_id != MC_CMD_MAE_ACTION_RULE_INSERT_OUT_ACTION_RULE_ID_NULL)
+-		efx_tc_delete_rule(efx, rule);
++		efx_tc_delete_rule(efx, rule, NULL);
+ 	rule->fw_id = MC_CMD_MAE_ACTION_RULE_INSERT_OUT_ACTION_RULE_ID_NULL;
+ }
+ 
+@@ -5436,7 +5662,7 @@ static int efx_tc_configure_fallback_acts_reps(struct efx_nic *efx)
+ static void efx_tc_deconfigure_fallback_acts(struct efx_nic *efx,
+ 					     struct efx_tc_action_set_list *acts)
+ {
+-	efx_tc_free_action_set_list(efx, acts, true);
++	efx_tc_free_action_set_list(efx, acts, true, NULL);
+ }
+ 
+ #ifdef CONFIG_SFC_DEBUGFS
+@@ -6507,6 +6733,122 @@ static int efx_tc_debugfs_dump_mae_tables(struct seq_file *file, void *data)
+ 	return 0;
+ }
+ 
++#define LATENCIES_TC_ADD \
++	efx->tc->offload_lat[EFX_OFFLOAD_LAT_TC_1M_ADD + mcdi_cnt - 1]
++#define LATENCIES_TC_DEL \
++	efx->tc->offload_lat[EFX_OFFLOAD_LAT_TC_1M_DEL + mcdi_cnt - 1]
++
++static int efx_ct_debugfs_ct_lat_reset(struct seq_file *file, void *data)
++{
++	struct efx_nic *efx = data;
++
++	atomic64_set(&LATENCIES_CT_ADD.total_count_latencies, 0);
++	atomic64_set(&LATENCIES_CT_ADD.total_added_latencies, 0);
++	LATENCIES_CT_ADD.max_latency = 0;
++	atomic64_set(&LATENCIES_CT_DEL.total_count_latencies, 0);
++	atomic64_set(&LATENCIES_CT_DEL.total_added_latencies, 0);
++	LATENCIES_CT_DEL.max_latency = 0;
++
++	return 0;
++}
++
++static int efx_tc_debugfs_dump_ct_offload_lat(struct seq_file *file, void *data)
++{
++	struct efx_nic *efx = data;
++	int64_t total_count, total_added;
++
++	total_count = atomic64_read(&LATENCIES_CT_ADD.total_count_latencies);
++	total_added = atomic64_read(&LATENCIES_CT_ADD.total_added_latencies);
++
++	seq_printf(file, "\n\tCT replace:\n");
++	seq_printf(file, "\t\tTotal: %llu\n", total_count);
++	seq_printf(file, "\t\tMax: %llu\n", LATENCIES_CT_ADD.max_latency);
++	if (total_count)
++		seq_printf(file, "\t\tMean: %llu\n",
++				 total_added / total_count);
++
++	total_count = atomic64_read(&LATENCIES_CT_DEL.total_count_latencies);
++	total_added = atomic64_read(&LATENCIES_CT_DEL.total_added_latencies);
++
++	seq_printf(file, "\n\tCT destroy:\n");
++	seq_printf(file, "\t\tTotal: %llu\n", total_count);
++	seq_printf(file, "\t\tMax: %llu\n", LATENCIES_CT_DEL.max_latency);
++
++	if (total_count)
++		seq_printf(file, "\t\tMean: %llu\n",
++				 total_added / total_count);
++	return 0;
++}
++
++static int efx_tc_debugfs_tc_lat_reset (struct seq_file *file, void *data)
++{
++	struct efx_nic *efx = data;
++	int mcdi_cnt = 1;
++
++	while (mcdi_cnt < 6) {
++		atomic64_set(&LATENCIES_TC_ADD.total_count_latencies, 0);
++		atomic64_set(&LATENCIES_TC_ADD.total_added_latencies, 0);
++		LATENCIES_TC_ADD.max_latency = 0;
++		atomic64_set(&LATENCIES_TC_DEL.total_count_latencies, 0);
++		atomic64_set(&LATENCIES_TC_DEL.total_added_latencies, 0);
++		LATENCIES_TC_DEL.max_latency = 0;
++		mcdi_cnt++;
++	}
++
++	return 0;
++}
++
++static int efx_tc_debugfs_dump_tc_offload_lat(struct seq_file *file, void *data)
++{
++	struct efx_nic *efx = data;
++	int64_t total_count, total_added;
++	int mcdi_cnt = 1;
++
++	while (mcdi_cnt < 6) {
++		total_count = atomic64_read(&LATENCIES_TC_ADD.total_count_latencies);
++		if (!total_count) {
++			mcdi_cnt++;
++			continue;
++		}
++
++		total_added = atomic64_read(&LATENCIES_TC_ADD.total_added_latencies);
++
++		seq_printf(file, "\n\tTC replace: %d MCDI issued\n", mcdi_cnt);
++		seq_printf(file, "\t\tTotal: %llu\n", total_count);
++		seq_printf(file, "\t\tMax: %llu\n", LATENCIES_TC_ADD.max_latency);
++
++		if (total_count)
++			seq_printf(file, "\t\tMean: %llu\n",
++					 total_added / total_count);
++		mcdi_cnt++;
++	}
++
++	seq_printf(file, "\n===============================\n");
++
++	mcdi_cnt = 1;
++
++	while (mcdi_cnt < 6) {
++		total_count = atomic64_read(&LATENCIES_TC_DEL.total_count_latencies);
++		if (!total_count) {
++			mcdi_cnt++;
++			continue;
++		}
++
++		total_added = atomic64_read(&LATENCIES_TC_DEL.total_added_latencies);
++
++		seq_printf(file, "\n\tTC destroy: %d MCDI issued\n", mcdi_cnt);
++		seq_printf(file, "\t\tTotal: %llu\n", total_count);
++		seq_printf(file, "\t\tMax: %llu\n", LATENCIES_TC_DEL.max_latency);
++		if (total_count)
++			seq_printf(file, "\t\tMean: %llu\n",
++					 total_added / total_count);
++		mcdi_cnt++;
++	}
++	seq_printf(file, "\n");
++
++	return 0;
++}
++
+ static struct efx_debugfs_parameter efx_tc_debugfs[] = {
+ 	_EFX_RAW_PARAMETER(mae_rules, efx_tc_debugfs_dump_rules),
+ 	_EFX_RAW_PARAMETER(lhs_rules, efx_tc_debugfs_dump_lhs_rules),
+@@ -6526,6 +6868,14 @@ static struct efx_debugfs_parameter efx_tc_debugfs[] = {
+ 	_EFX_RAW_PARAMETER(mae_mport_map, efx_tc_debugfs_dump_mports),
+ #endif
+ 	_EFX_RAW_PARAMETER(mae_tables, efx_tc_debugfs_dump_mae_tables),
++	_EFX_RAW_PARAMETER(ct_offload_latencies,
++			   efx_tc_debugfs_dump_ct_offload_lat),
++	_EFX_RAW_PARAMETER(tc_offload_latencies,
++			   efx_tc_debugfs_dump_tc_offload_lat),
++	_EFX_RAW_PARAMETER(tc_latencies_reset,
++			   efx_tc_debugfs_tc_lat_reset),
++	_EFX_RAW_PARAMETER(ct_latencies_reset,
++			   efx_ct_debugfs_ct_lat_reset),
+ 	{NULL}
+ };
+ #endif /* CONFIG_SFC_DEBUGFS */
+@@ -6938,26 +7288,36 @@ static int efx_tc_configure_default_rule_wire(struct efx_nic *efx)
+ 	return efx_tc_configure_default_rule(efx, ing_port, eg_port, rule);
+ }
+ 
+-static void efx_tc_delete_rule(struct efx_nic *efx, struct efx_tc_flow_rule *rule)
++static void efx_tc_delete_rule(struct efx_nic *efx, struct efx_tc_flow_rule *rule,
++			       int *mcdi_cnt)
+ {
+ 	struct efx_tc_action_set *act, *next;
++	int mcnt = 0;
++
++	if (mcdi_cnt)
++		mcnt = *mcdi_cnt;
+ 
+ 	efx_mae_delete_rule(efx, rule->fw_id);
++	mcnt++;
+ 
+ 	/* Release entries in subsidiary tables */
+ 	efx_mae_free_action_set_list(efx, &rule->acts);
+ 	list_for_each_entry_safe(act, next, &rule->acts.list, list) {
+ 		efx_mae_free_action_set(efx, act->fw_id);
++		mcnt++;
+ 		kfree(act);
+ 	}
+ 	rule->fw_id = MC_CMD_MAE_ACTION_RULE_INSERT_OUT_ACTION_RULE_ID_NULL;
++
++	if (mcdi_cnt)
++		*mcdi_cnt = mcnt;
+ }
+ 
+ static void efx_tc_deconfigure_default_rule(struct efx_nic *efx,
+ 					    struct efx_tc_flow_rule *rule)
+ {
+ 	if (rule->fw_id != MC_CMD_MAE_ACTION_RULE_INSERT_OUT_ACTION_RULE_ID_NULL)
+-		efx_tc_delete_rule(efx, rule);
++		efx_tc_delete_rule(efx, rule, NULL);
+ 	rule->fw_id = MC_CMD_MAE_ACTION_RULE_INSERT_OUT_ACTION_RULE_ID_NULL;
+ }
+ 
+diff --git a/drivers/net/ethernet/sfc/tc.h b/drivers/net/ethernet/sfc/tc.h
+index c63573ce5..1c2608720 100644
+--- a/drivers/net/ethernet/sfc/tc.h
++++ b/drivers/net/ethernet/sfc/tc.h
+@@ -344,6 +344,38 @@ struct efx_tc_table_ct { /* TABLE_ID_CONNTRACK_TABLE */
+ 	} resps;
+ };
+ 
++/*
++ * The latency type is based on three components:
++ *     1) TC or CT offload
++ *     2) ADD or DEL offload
++ *     3) Number of MCDI commands required.
++ *
++ * CT do always require same amount of MCDI commands, so just
++ * two components needed: CT+ADD or CT+DEL.
++ */
++enum efx_offload_latency_type {
++	EFX_OFFLOAD_LAT_TC_1M_ADD, /* 1M = 1 MCDI command issued */
++	EFX_OFFLOAD_LAT_TC_2M_ADD,
++	EFX_OFFLOAD_LAT_TC_3M_ADD,
++	EFX_OFFLOAD_LAT_TC_4M_ADD,
++	EFX_OFFLOAD_LAT_TC_5M_ADD, /* 5M = 5 MCDI commands issued */
++	EFX_OFFLOAD_LAT_TC_1M_DEL, /* 1M = 1 MCDI command issued */
++	EFX_OFFLOAD_LAT_TC_2M_DEL,
++	EFX_OFFLOAD_LAT_TC_3M_DEL,
++	EFX_OFFLOAD_LAT_TC_4M_DEL,
++	EFX_OFFLOAD_LAT_TC_5M_DEL, /* 5M = 5 MCDI commands issued */
++	EFX_OFFLOAD_LAT_CT_ADD,
++	EFX_OFFLOAD_LAT_CT_DEL,
++	EFX_OFFLOAD_LAT_MAX,
++};
++
++struct efx_offload_latency_stats {
++	u64 max_latency;
++	atomic64_t total_added_latencies;
++	atomic64_t total_count_latencies;
++
++};
++
+ /**
+  * struct efx_tc_state - control plane data for TC offload
+  *
+@@ -383,6 +415,9 @@ struct efx_tc_table_ct { /* TABLE_ID_CONNTRACK_TABLE */
+  *	traffic from wire, and egressing to PF
+  * @facts.reps: action-set-list for unready rules on representors, hence
+  *	applying to traffic from representees, and egressing to the reps mport
++ * @ offload_lat: offload latencies structs array. Each array component is
++ *                about offload type based on TC or CT, ADD or DEL, and number
++ *                of MCDI commands issued.
+  * @up: have TC datastructures been set up?
+  */
+ struct efx_tc_state {
+@@ -422,6 +457,7 @@ struct efx_tc_state {
+ 		struct efx_tc_action_set_list pf;
+ 		struct efx_tc_action_set_list reps;
+ 	} facts;
++	struct efx_offload_latency_stats offload_lat[EFX_OFFLOAD_LAT_MAX];
+ 	bool up;
+ };
+ 
