@@ -1,0 +1,181 @@
+
+       - name: run tcp server in one network namespace
+         shell: sudo bash -c "killall server; sleep 2; ip netns exec test_ns1 /tmp/multithread_tcp/multithread/server {{ first_port_addr }}"
+         when: inventory_hostname in groups['group1']
+
+       - name: create test directory
+         shell: sudo bash -c "date +%d_%m_%y_%H:%M"
+         register: test_date_time
+         when: inventory_hostname in groups['group2']
+
+       - name: starts client script with just one thread
+         shell: sudo bash -c "sleep 5;ip netns exec test_ns1 ./launch_latency_perf.sh vf2vf_vxlan_noct {{ test_date_time.stdout }} {{ first_port_addr }} 1"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get mcdi latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/1_threads/mcdi_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_offload_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/1_threads/ct_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+         # Resetting MCDI and CT latencies
+         #
+       - name: reset MCDI latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: reset CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+
+         # this sucks but I have no time to find out how to loop previous tasks with different value for the threads variable
+         
+         # 10 threads
+         #
+       - name: starts client script with 10 threads
+         shell: sudo bash -c "sleep 5;ip netns exec test_ns1 ./launch_latency_perf.sh vf2vf_vxlan_noct {{ test_date_time.stdout }} {{ first_port_addr }} 10"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get mcdi latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/10_threads/mcdi_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_offload_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/10_threads/ct_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+         # Resetting MCDI and CT latencies
+         #
+       - name: reset MCDI latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: reset CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+         #
+         # 100 threads
+         #
+       - name: starts client script with 100 threads
+         shell: sudo bash -c "sleep 5;ip netns exec test_ns1 ./launch_latency_perf.sh vf2vf_vxlan_noct {{ test_date_time.stdout }} {{ first_port_addr }} 100"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get mcdi latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/100_threads/mcdi_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_offload_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/100_threads/ct_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+         # Resetting MCDI and CT latencies
+         #
+       - name: reset MCDI latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: reset CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+         # 256 thread
+         #
+       - name: starts client script with 256 threads
+         shell: sudo bash -c "sleep 5;ip netns exec test_ns1 ./launch_latency_perf.sh vf2vf_vxlan_noct {{ test_date_time.stdout }} {{ first_port_addr }} 256"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get mcdi latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/256_threads/mcdi_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_offload_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/256_threads/ct_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+         # Resetting MCDI and CT latencies
+         #
+       - name: reset MCDI latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: reset CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+         # 512 thread
+         #
+       - name: starts client script with 512 threads
+         shell: sudo bash -c "sleep 5;ip netns exec test_ns1 ./launch_latency_perf.sh vf2vf_vxlan_noct {{ test_date_time.stdout }} {{ first_port_addr }} 512"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get mcdi latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/512_threads/mcdi_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: get CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_offload_latencies' > latency_perf_results/vf2vf_vxlan_noct/{{ test_date_time.stdout }}/512_threads/ct_latencies"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+         # Resetting MCDI and CT latencies
+         #
+       - name: reset MCDI latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/mcdi_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']
+
+       - name: reset CT latencies
+         shell: sudo bash -c "ssh dellr740x 'cat /sys/kernel/debug/sfc/if_ens1f0/ct_latencies_reset'"
+         args:
+            chdir: "{{ destdir }}"
+         when: inventory_hostname in groups['group2']

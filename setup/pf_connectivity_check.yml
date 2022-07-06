@@ -1,0 +1,13 @@
+
+       - name: run ping between PFs
+         shell: sudo bash -c "ping -c10 {{ node2_PF_ip_addr}} | echo $?"
+         register: ping_ok
+         when: inventory_hostname in groups['group1']
+
+       - fail: msg="ping returned error"
+         when: inventory_hostname in groups['group1'] and ping_ok.stdout != "0"
+
+       - name: Checking ping is as expected
+         debug:
+                 msg: OK
+         when: inventory_hostname in groups['group1'] and ping_ok.stdout == "0"

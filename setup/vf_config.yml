@@ -1,0 +1,117 @@
+# there are now two private networks using same IP addresses:
+#
+#    VXLAN 16, Node1 CT Zone 1,  Node 1 VF1 192.168.25.10 <------>  Node 2 VF1 192.168.25.11
+#    VXLAN 17, Node1 CT Zonw 2,  Node 1 VF2 192.168.25.10 <------>  Node 2 VF2 192.168.25.11
+#
+       - name: create two VFs
+         shell: sudo bash -c "echo 2 > /sys/bus/pci/devices/{{ node1_iface_pcidev.stdout }}/sriov_numvfs"
+         when: inventory_hostname in groups['group1']
+
+       - name: create two VFs
+         shell: sudo bash -c "echo 2 > /sys/bus/pci/devices/{{ node2_iface_pcidev.stdout }}/sriov_numvfs"
+         when: inventory_hostname in groups['group2']
+
+       - name: detect sfc interface PCI DEV VF1 in node1
+         shell: ./detect_sfc_netdev.sh Name VF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node1_iface_name_vf1
+         when: inventory_hostname in groups['group1']
+
+       - name: detect sfc interface PCI DEV VF2
+         shell: ./detect_sfc_netdev.sh Name VF 2
+         args:
+            chdir: "{{ destdir }}"
+         register: node1_iface_name_vf2
+         when: inventory_hostname in groups['group1']
+
+       - name: Get first VF representor name
+         shell: "sudo dmesg | grep \"Representor for VF 0\" | awk '{ match($0,/(Representor for VF 0 is )+(eth[0-9])/,arr)} {print arr[2] }' | tail -1"
+         register: node1_vf1_repr
+         when: inventory_hostname in groups['group1']
+
+       - name: Get second VF representor name
+         shell: "sudo dmesg | grep \"Representor for VF 1\" | awk '{ match($0,/(Representor for VF 1 is )+(eth[0-9])/,arr)} {print arr[2] }' | tail -1"
+         register: node1_vf2_repr
+         when: inventory_hostname in groups['group1']
+
+       - name: create first network namespace and assign first VF to it
+         shell: sudo bash -c "ip netns add test_ns1; ip link set {{ node1_iface_name_vf1.stdout }} netns test_ns1"
+         when: inventory_hostname in groups['group1']
+
+       - name: Configure VF inside the network namespace
+         shell: sudo bash -c "ip netns exec test_ns1 ifconfig {{ node1_iface_name_vf1.stdout }} hw ether de:ad:be:ef:00:01;
+                                ip netns exec test_ns1 ifconfig {{ node1_iface_name_vf1.stdout }} {{ first_port_addr }} netmask 255.255.255.0;
+                                ip netns exec test_ns1 ifconfig {{ node1_iface_name_vf1.stdout }} mtu 1450"
+         when: inventory_hostname in groups['group1']
+
+       - name: Configure first VF representor
+         shell: sudo bash -c "ifconfig {{ node1_vf1_repr.stdout }} up; tc qdisc add dev {{ node1_vf1_repr.stdout }} ingress"
+         when: inventory_hostname in groups['group1']
+
+       - name: create second network namespace and assign second VF to it
+         shell: sudo bash -c "ip netns add test_ns2; ip link set {{ node1_iface_name_vf2.stdout }} netns test_ns2"
+         when: inventory_hostname in groups['group1']
+
+       - name: Configure VF inside the network namespace
+         shell: sudo bash -c "ip netns exec test_ns2 ifconfig {{ node1_iface_name_vf2.stdout }} hw ether de:ad:be:ef:00:01;
+                              ip netns exec test_ns2 ifconfig {{ node1_iface_name_vf2.stdout }} {{ first_port_addr }} netmask 255.255.255.0;
+                              ip netns exec test_ns2  ifconfig {{ node1_iface_name_vf2.stdout }} mtu 1450"
+         when: inventory_hostname in groups['group1']
+
+       - name: Configure second VF representor
+         shell: sudo bash -c "ifconfig {{ node1_vf2_repr.stdout }} up; tc qdisc add dev {{ node1_vf2_repr.stdout }} ingress"
+         when: inventory_hostname in groups['group1']
+
+       - name: detect sfc interface PCI DEV VF1 in node2
+         shell: ./detect_sfc_netdev.sh Name VF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node2_iface_name_vf1
+         when: inventory_hostname in groups['group2']
+
+       - name: detect sfc interface PCI DEV VF2
+         shell: ./detect_sfc_netdev.sh Name VF 2
+         args:
+            chdir: "{{ destdir }}"
+         register: node2_iface_name_vf2
+         when: inventory_hostname in groups['group2']
+
+       - name: Get first VF representor name
+         shell: "sudo dmesg | grep \"Representor for VF 0\" | awk '{ match($0,/(Representor for VF 0 is )+(eth[0-9])/,arr)} {print arr[2] }' | tail -1"
+         register: node2_vf1_repr
+         when: inventory_hostname in groups['group2']
+
+       - name: Get second VF representor name
+         shell: "sudo dmesg | grep \"Representor for VF 1\" | awk '{ match($0,/(Representor for VF 1 is )+(eth[0-9])/,arr)} {print arr[2] }' | tail -1"
+         register: node2_vf2_repr
+         when: inventory_hostname in groups['group2']
+
+       - name: create first network namespace and assign first VF to it
+         shell: sudo bash -c "ip netns add test_ns1; ip link set {{ node2_iface_name_vf1.stdout }} netns test_ns1"
+         when: inventory_hostname in groups['group2']
+
+       - name: Configure VF inside the network namespace
+         shell: sudo bash -c "ip netns exec test_ns1 ifconfig {{ node2_iface_name_vf1.stdout }} hw ether de:ad:be:ef:00:02;
+                                ip netns exec test_ns1 ifconfig {{ node2_iface_name_vf1.stdout }} {{ second_port_addr }} netmask 255.255.255.0;
+                                ip netns exec test_ns1 ifconfig {{ node2_iface_name_vf1.stdout }} mtu 1450"
+         when: inventory_hostname in groups['group2']
+
+       - name: Configure first VF representor
+         shell: sudo bash -c "ifconfig {{ node2_vf1_repr.stdout }} up; tc qdisc add dev {{ node2_vf1_repr.stdout }} ingress"
+         when: inventory_hostname in groups['group2']
+
+       - name: create second network namespace and assign second VF to it
+         shell: sudo bash -c "ip netns add test_ns2; ip link set {{ node2_iface_name_vf2.stdout }} netns test_ns2"
+         when: inventory_hostname in groups['group2']
+
+       - name: Configure VF inside the network namespace
+         shell: sudo bash -c "ip netns exec test_ns2 ifconfig {{ node2_iface_name_vf2.stdout }} hw ether de:ad:be:ef:00:02;
+                              ip netns exec test_ns2 ifconfig {{ node2_iface_name_vf2.stdout }} {{ second_port_addr }} netmask 255.255.255.0;
+                              ip netns exec test_ns2   ifconfig {{ node2_iface_name_vf2.stdout }} mtu 1450"
+         when: inventory_hostname in groups['group2']
+
+       - name: Configure second VF representor
+         shell: sudo bash -c "ifconfig {{ node2_vf2_repr.stdout }} up; tc qdisc add dev {{ node2_vf2_repr.stdout }} ingress"
+         when: inventory_hostname in groups['group2']
+

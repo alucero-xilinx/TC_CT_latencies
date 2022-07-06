@@ -1,0 +1,47 @@
+#
+# Configuring the PFs network interfaces
+#
+
+
+       - name: detect sfc interface name
+         shell: ./detect_sfc_netdev.sh Name PF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node1_iface_name1
+         when: inventory_hostname in groups['group1']
+
+       - name: detect sfc interface PCI DEV
+         shell: ./detect_sfc_netdev.sh Device PF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node1_iface_pcidev
+         when: inventory_hostname in groups['group1']
+
+       - name: configure sfc interface first node
+         shell: "sudo ifconfig {{ node1_iface_name1.stdout }} {{ node1_PF_ip_addr }} netmask 255.255.255.0;
+                 sudo ifconfig {{ node1_iface_name1.stdout }} hw ether {{ node1_PF_mac_addr }};
+                 sudo ip link set dev {{ node1_iface_name1.stdout }} promisc on"
+         when: inventory_hostname in groups['group1']
+
+
+
+       - name: detect sfc interface name
+         shell: ./detect_sfc_netdev.sh Name PF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node2_iface_name1
+         when: inventory_hostname in groups['group2']
+
+       - name: detect sfc interface PCI DEV
+         shell: ./detect_sfc_netdev.sh Device PF 1
+         args:
+            chdir: "{{ destdir }}"
+         register: node2_iface_pcidev
+         when: inventory_hostname in groups['group2']
+
+       - name: configure sfc interface second node
+         shell: "sudo ifconfig {{ node2_iface_name1.stdout }} {{ node2_PF_ip_addr }} netmask 255.255.255.0;
+                 sudo ifconfig {{ node2_iface_name1.stdout }} hw ether {{ node2_PF_mac_addr }};
+                 sudo ip link set dev {{ node2_iface_name1.stdout }} promisc on"
+         when: inventory_hostname in groups['group2']
+

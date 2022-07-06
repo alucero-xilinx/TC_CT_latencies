@@ -1,0 +1,12 @@
+
+       - name: creating vxlan device
+         shell: "sudo ip link add name vxlan16 type vxlan external dev {{ node1_iface_name1.stdout }} remote 2.2.2.2 dstport 4789;
+                 sudo ifconfig vxlan16  up; sudo tc qdisc add dev vxlan16 ingress"
+         when: inventory_hostname in groups['group1']
+
+       - name: creating vxlan device
+         #shell: "sudo ip link add name vxlan16 type vxlan id 16 dev {{ node2_iface_name1.stdout }} remote 2.2.2.1 dstport 4789;
+         shell: "sudo ip link add name vxlan16 type vxlan external dev {{ node2_iface_name1.stdout }} remote 2.2.2.1 dstport 4789;
+                 sudo ifconfig vxlan16  up; sudo tc qdisc add dev vxlan16 ingress"
+         when: inventory_hostname in groups['group2']
+

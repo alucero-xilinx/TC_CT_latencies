@@ -1,0 +1,134 @@
+---
+  - name: SN1022 TC latencies tests (two nodes)
+    hosts: group1 group2
+    any_errors_fatal: true
+    remote_user: alucerop
+    vars:
+       - destdir: /tmp/sfc_tc_unit_tests
+       - driver_dir: /tmp/sfc_tc_unit_tests/sfc-linux-net
+       - results_dir: /home/alucerop/
+       - clean_all: "no"
+       - build_all: "yes"
+       - node1_PF_ip_addr: 2.2.2.1
+       - node1_PF_mac_addr: de:ad:be:ef:10:01
+       - node2_PF_ip_addr: 2.2.2.2
+       - node2_PF_mac_addr: de:ad:be:ef:10:02
+       - first_port_addr: 192.168.25.10
+       - second_port_addr: 192.168.25.11
+       - vxlan: "yes"
+       - vf_enabled: "yes"
+       - all_tests: []
+
+    tasks:
+
+       - name: clean all
+         file:
+            path: "{{ destdir }}"
+            state: absent
+         when: clean_all | bool
+ 
+       - name: remove sfc driver
+         shell:
+         args:
+           cmd: sudo rmmod virtual_bus sfc_driverlink sfc
+         ignore_errors: yes
+
+       - name: remove vxlan device if it does exists
+         shell:
+         args:
+           cmd: sudo ip link del name vxlan16 2> /dev/null
+         ignore_errors: yes
+
+       - name: check driver repo exists
+         stat:
+           path: "{{ driver_dir }}"
+         register: file_details
+
+       - name: create test dir
+         file:
+            path: "{{ destdir }}"
+            state: directory
+         ignore_errors: yes
+
+         # it would be good to use a user directory with the last changes to
+         # the driver for testing before pushing the changes
+       - name: Download driver master repo
+         git:
+            repo: 'git@github.com:Xilinx-CNS/sfc-linux-net.git'
+            dest: "{{ driver_dir }}"
+         when: (file_details.stat.exists == false)
+
+       - name: check system support TC, CT and OVS
+         shell: sudo ./scripts/check-tc-features.sh --ignore-ovs
+         args:
+            chdir: "{{ driver_dir }}"
+         when: inventory_hostname in groups['group1']
+
+       - name: build driver
+         shell: make
+         args:
+            chdir: "{{ driver_dir }}"
+            executable: /bin/bash
+         when: build_all | bool
+
+       - name: copy setup scripts
+         copy:
+           src: /home/alucerop/ansible_scripts/
+           dest: "{{ destdir }}"
+           mode: '0755'
+
+       - name: copy tcp multithread programs
+         copy:
+           src: /home/alucerop/multithread_tcp
+           dest: /tmp/
+           mode: '0755'
+
+       - name: install driver
+         shell: sudo ./install_sfc_driver.sh
+         args:
+            chdir: "{{ destdir }}"
+
+       - include: setup/pf_config.yml
+         #- include: setup/pf_connectivity_check.yml
+
+       - include: setup/vxlan_config.yml
+         when: vxlan | bool
+
+       - include: setup/vf_config.yml
+         when: vf_enabled | bool
+
+       - include: setup/vf_connectivity_check.yml
+         when: vf_enabled | bool
+
+       - include: setup/vf_tc_rules.yml
+         when: vf_enabled | bool
+
+       - include: setup/vf_tcp_exchange.yml
+         when: vf_enabled | bool
+
+         #- name: starts multithread server
+         #shell: "sudo killall server; sleep 2; sudo ../multithread_tcp/multithread/server 2.2.2.1"
+         #args:
+         #   chdir: "{{ destdir }}"
+         #when: inventory_hostname in groups['group1']
+
+         #- name: checking the server is there
+         #shell: "sudo netstat -anp | grep LISTEN | grep 9002 | awk ' { print $4 }'"
+         #register: netstat_output
+         #args:
+         #   chdir: "{{ destdir }}"
+         #when: inventory_hostname in groups['group1']
+
+         #- fail: msg="multithread TCP server is not running"
+         #when: inventory_hostname in groups['group1'] and netstat_output.stdout != "2.2.2.1:9002"
+
+         #- name: starts client script
+         #shell: sudo bash -c "./launch_latency_perf.sh"
+         #args:
+         #   chdir: "{{ destdir }}"
+         #when: inventory_hostname in groups['group2']
+         #
+         #- include:  udp_ipv4/dual/sfc_test_tc_udp_conn.yml
+
+         #- name: print the executed tests
+         #debug: var=all_tests
